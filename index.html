@@ -1,0 +1,2387 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <title>Financial Vault & Capital Allocator</title>
+
+  <!-- PWA: manifest & installability -->
+  <link rel="manifest" href="manifest.json">
+  <meta name="theme-color" content="#10b981">
+  <meta name="background-color" content="#0f172a">
+
+  <!-- PWA: icons -->
+  <link rel="icon" type="image/png" sizes="32x32" href="icons/favicon-32.png">
+  <link rel="icon" type="image/png" sizes="16x16" href="icons/favicon-16.png">
+  <link rel="shortcut icon" href="icons/favicon.ico">
+  <link rel="apple-touch-icon" sizes="180x180" href="icons/icon-180.png">
+
+  <!-- PWA: iOS / Android standalone install behavior -->
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="FinVault">
+  <meta name="mobile-web-app-capable" content="yes">
+
+  <!-- Tailwind CSS -->
+  <script src="https://cdn.tailwindcss.com"></script>
+
+  <!-- React & ReactDOM -->
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+
+  <!-- Babel Compiler for In-Browser JSX -->
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+  <!-- File Parsing & PDF Generation Libraries -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+
+  <!-- Lucide Icons -->
+  <script src="https://unpkg.com/lucide@latest"></script>
+
+  <style>
+    @media print {
+      .no-print { display: none !important; }
+      body { background: #fff !important; }
+      #strategy-report-print, #strategy-report-print * {
+        background: #fff !important;
+        color: #111 !important;
+        border-color: #ccc !important;
+        box-shadow: none !important;
+      }
+    }
+  </style>
+</head>
+<body class="bg-slate-900 text-slate-100 font-sans min-h-screen">
+
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect, useRef } = React;
+    const { jsPDF } = window.jspdf;
+
+    pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+
+    // ============================================================
+    // CONFIG
+    // ============================================================
+    const DB_NAME = 'FinancialVaultDB_V4';
+    const DB_VERSION = 4;
+    const STORES = {
+      ACCOUNTS: 'financial_records',
+      EXPENSES: 'expenses_records',
+      DOCUMENTS: 'documents',
+      CONTACTS: 'contacts',
+      NETWORTH_HISTORY: 'networth_history'
+    };
+
+    const CATEGORIES = ['Housing/Mortgage', 'Utilities', 'Insurance', 'Subscriptions', 'Debt Service', 'Transportation', 'Lifestyle', 'Other'];
+
+    const GROQ_ENDPOINT = 'https://api.groq.com/openai/v1/chat/completions';
+    const DEFAULT_TEXT_MODEL = 'openai/gpt-oss-120b';
+    const DEFAULT_VISION_MODEL = 'qwen/qwen3.6-27b';
+    const DEFAULT_STALE_DAYS = 60;
+
+    // ============================================================
+    // CLIENT-SIDE AUTO-CATEGORIZATION (used when no AI key is set)
+    // ============================================================
+    const autoCategorize = (name) => {
+      const lower = name.toLowerCase();
+      if (/mortgage|rent|housing|hoa/i.test(lower)) return 'Housing/Mortgage';
+      if (/power|electric|water|gas|utility|internet|spectrum|comcast|duke|sewer/i.test(lower)) return 'Utilities';
+      if (/insurance|geico|state farm|allstate|progressive|health|life/i.test(lower)) return 'Insurance';
+      if (/netflix|hulu|spotify|apple|google|disney|subscription|adobe|cloud/i.test(lower)) return 'Subscriptions';
+      if (/card|loan|chase|citi|discover|amex|capital one|interest/i.test(lower)) return 'Debt Service';
+      if (/auto|car|fuel|gasoline|tesla|gmc|toyota|ford|toll/i.test(lower)) return 'Transportation';
+      return 'Other';
+    };
+
+    // ============================================================
+    // INDEXEDDB HELPERS
+    // ============================================================
+    const initDB = () => {
+      return new Promise((resolve, reject) => {
+        const request = indexedDB.open(DB_NAME, DB_VERSION);
+        request.onupgradeneeded = (e) => {
+          const db = e.target.result;
+          if (!db.objectStoreNames.contains(STORES.ACCOUNTS)) db.createObjectStore(STORES.ACCOUNTS, { keyPath: 'id' });
+          if (!db.objectStoreNames.contains(STORES.EXPENSES)) db.createObjectStore(STORES.EXPENSES, { keyPath: 'id' });
+          if (!db.objectStoreNames.contains(STORES.DOCUMENTS)) db.createObjectStore(STORES.DOCUMENTS, { keyPath: 'id' });
+          if (!db.objectStoreNames.contains(STORES.CONTACTS)) db.createObjectStore(STORES.CONTACTS, { keyPath: 'id' });
+          if (!db.objectStoreNames.contains(STORES.NETWORTH_HISTORY)) db.createObjectStore(STORES.NETWORTH_HISTORY, { keyPath: 'date' });
+        };
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error);
+      });
+    };
+
+    const saveDBItem = async (storeName, item) => {
+      const db = await initDB();
+      return new Promise((resolve, reject) => {
+        const tx = db.transaction(storeName, 'readwrite');
+        tx.objectStore(storeName).put(item);
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => reject(tx.error);
+      });
+    };
+
+    const getDBItems = async (storeName) => {
+      const db = await initDB();
+      return new Promise((resolve, reject) => {
+        const tx = db.transaction(storeName, 'readonly');
+        const req = tx.objectStore(storeName).getAll();
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = () => reject(req.error);
+      });
+    };
+
+    const getDBItem = async (storeName, key) => {
+      const db = await initDB();
+      return new Promise((resolve, reject) => {
+        const tx = db.transaction(storeName, 'readonly');
+        const req = tx.objectStore(storeName).get(key);
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = () => reject(req.error);
+      });
+    };
+
+    const deleteDBItem = async (storeName, id) => {
+      const db = await initDB();
+      return new Promise((resolve, reject) => {
+        const tx = db.transaction(storeName, 'readwrite');
+        tx.objectStore(storeName).delete(id);
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => reject(tx.error);
+      });
+    };
+
+    const clearStore = async (storeName) => {
+      const db = await initDB();
+      return new Promise((resolve, reject) => {
+        const tx = db.transaction(storeName, 'readwrite');
+        tx.objectStore(storeName).clear();
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => reject(tx.error);
+      });
+    };
+
+    // ============================================================
+    // DATE / STALENESS HELPERS
+    // ============================================================
+    const isoToday = () => new Date().toISOString().slice(0, 10);
+
+    const daysBetween = (isoDateStr) => {
+      if (!isoDateStr) return null;
+      const then = new Date(isoDateStr + 'T00:00:00');
+      if (isNaN(then.getTime())) return null;
+      const now = new Date();
+      const nowMid = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+      return Math.round((nowMid - then) / 86400000);
+    };
+
+    const getStaleness = (statementDate, thresholdDays) => {
+      const age = daysBetween(statementDate);
+      if (age === null) return { known: false, isStale: true, age: null };
+      return { known: true, isStale: age > thresholdDays, age };
+    };
+
+    const nextOccurrenceOfDay = (dueDay) => {
+      const d = parseInt(dueDay, 10);
+      if (!d || d < 1 || d > 31) return null;
+      const now = new Date();
+      let candidate = new Date(now.getFullYear(), now.getMonth(), d);
+      if (candidate < new Date(now.getFullYear(), now.getMonth(), now.getDate())) {
+        candidate = new Date(now.getFullYear(), now.getMonth() + 1, d);
+      }
+      return candidate;
+    };
+
+    const daysUntil = (date) => {
+      if (!date) return null;
+      const now = new Date();
+      const nowMid = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+      return Math.round((date - nowMid) / 86400000);
+    };
+
+    const normalizeToISODate = (raw) => {
+      if (!raw) return '';
+      const d = new Date(raw);
+      if (isNaN(d.getTime())) return '';
+      return d.toISOString().slice(0, 10);
+    };
+
+    // ============================================================
+    // GROQ AI HELPERS
+    // ============================================================
+    const isLikelyVisionModel = (modelId) => /vision|vl-|scout|maverick|qwen3\.6|qwen3\.8|multimodal/i.test(modelId);
+
+    const fetchGroqModels = async (apiKey) => {
+      const res = await fetch('https://api.groq.com/openai/v1/models', {
+        headers: { 'Authorization': `Bearer ${apiKey}` }
+      });
+      if (!res.ok) {
+        const errText = await res.text().catch(() => '');
+        throw new Error(`Groq API error ${res.status}: ${errText}`);
+      }
+      const data = await res.json();
+      return (data.data || []).map(m => m.id).sort();
+    };
+
+    const parseJsonLoose = (str) => {
+      if (!str) return null;
+      try { return JSON.parse(str); } catch (e) {}
+      const match = str.match(/\{[\s\S]*\}/);
+      if (match) {
+        try { return JSON.parse(match[0]); } catch (e) {}
+      }
+      return null;
+    };
+
+    const buildExtractionSystemPrompt = () => `You are a financial document classifier and data extractor. You will be given the text (or image) of a document a user uploaded to their personal finance vault. Identify every piece of information that can reasonably be assumed from the document, and classify it correctly so it can be routed to the right place in the app (account ledger vs. recurring budget expenses).
+
+Return ONLY a raw JSON object (no markdown fences, no commentary) with these exact fields:
+{
+  "documentType": "statement" | "other",
+  "institution": string,
+  "accountType": "Checking" | "Savings" | "Credit Card" | "Mortgage" | "Auto Loan" | "Brokerage" | "Other",
+  "category": "Asset" | "Liability",
+  "accountNumberMasked": string,
+  "balance": number,
+  "interestRate": number,
+  "statementDate": "YYYY-MM-DD" or "",
+  "dueDay": number or null,
+  "confidence": "high" | "medium" | "low",
+  "recurringCharges": [ { "name": string, "amount": number, "category": one of [${CATEGORIES.join(', ')}], "dueDay": number or null } ]
+}
+
+Rules:
+- "documentType" is "statement" only if this is a bank/credit/loan/brokerage account statement with a balance. Otherwise (insurance card, tax form, receipt, ID, unrelated document) use "other" and leave numeric fields at 0/null but still fill institution/accountType/category with your best guess if reasonable, or "Unknown"/"Other" if not.
+- "category" reflects whether the account itself is an ASSET (checking, savings, brokerage — money the user has) or a LIABILITY (credit card, loan, mortgage — money the user owes). Use the account's own nature, not any single transaction's credit/debit direction.
+- "statementDate" is the statement closing date / "as of" date / statement period end date printed on the document, in YYYY-MM-DD format. Leave "" if not found — do not guess today's date.
+- "dueDay" is the day-of-month (1-31) this account's own payment/bill is due, if a due date is printed. Otherwise null.
+- "recurringCharges" lists other fixed/recurring monthly obligations you can clearly identify inside this document — e.g. a subscription charge, a recurring auto-draft utility payment, an insurance premium, or a separate loan/mortgage payment line — that are distinct from this account's own balance. Do NOT list one-off purchases, individual retail transactions, or this account's own balance/payment as a recurring charge. Pick the closest matching category from the list given. Return an empty array if none are clearly recurring.
+- Assets (checking, savings, brokerage) are positive balances; liabilities (credit card, loan, mortgage) should have category "Liability".
+- Output must be valid JSON and nothing else.`;
+
+    const callGroq = async (apiKey, body) => {
+      const res = await fetch(GROQ_ENDPOINT, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${apiKey}`
+        },
+        body: JSON.stringify(body)
+      });
+      if (!res.ok) {
+        const errText = await res.text().catch(() => '');
+        throw new Error(`Groq API error ${res.status}: ${errText}`);
+      }
+      const data = await res.json();
+      const content = data && data.choices && data.choices[0] && data.choices[0].message
+        ? data.choices[0].message.content
+        : '';
+      return parseJsonLoose(content);
+    };
+
+    const extractWithGroqText = async (fullText, apiKey, model) => {
+      const truncated = fullText.slice(0, 14000);
+      return callGroq(apiKey, {
+        model: model || DEFAULT_TEXT_MODEL,
+        temperature: 0.1,
+        response_format: { type: 'json_object' },
+        messages: [
+          { role: 'system', content: buildExtractionSystemPrompt() },
+          { role: 'user', content: `Document text:\n\n${truncated}` }
+        ]
+      });
+    };
+
+    const extractWithGroqVision = async (dataUrl, apiKey, model) => {
+      return callGroq(apiKey, {
+        model: model || DEFAULT_VISION_MODEL,
+        temperature: 0.1,
+        response_format: { type: 'json_object' },
+        messages: [
+          { role: 'system', content: buildExtractionSystemPrompt() },
+          {
+            role: 'user',
+            content: [
+              { type: 'text', text: 'Extract the fields from this document image.' },
+              { type: 'image_url', image_url: { url: dataUrl } }
+            ]
+          }
+        ]
+      });
+    };
+
+    // ============================================================
+    // REGEX FALLBACK EXTRACTION (used when no Groq key is set, or Groq call fails)
+    // ============================================================
+    const regexExtractFromText = (fullText) => {
+      const balanceMatch = fullText.match(/(?:Total Amount Due|Statement Balance|New Balance|Ending Balance|Current Balance)[^\d]*\$?\s*([0-9,]+\.[0-9]{2})/i);
+      const parsedBalance = balanceMatch ? parseFloat(balanceMatch[1].replace(/,/g, '')) : 0;
+
+      const aprMatch = fullText.match(/(?:Annual Percentage Rate|APR|Interest Rate)[^\d]*([0-9]{1,2}\.[0-9]{1,2})%/i);
+      const parsedAPR = aprMatch ? parseFloat(aprMatch[1]) : 0;
+
+      const acctMatch = fullText.match(/(?:Account Number|Acct #|Ending in)[^\d]*(\*{3,4}[0-9]{4}|[0-9]{4})/i);
+      const parsedAcct = acctMatch ? acctMatch[1] : '';
+
+      const dateMatch = fullText.match(/(?:Statement Date|Statement Closing Date|Closing Date|Statement Period Ending|As of)[^\d\w]{0,15}([A-Za-z]+\s+\d{1,2},?\s+\d{4}|\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4})/i);
+      const statementDate = dateMatch ? normalizeToISODate(dateMatch[1]) : '';
+
+      const dueDateMatch = fullText.match(/(?:Payment Due Date|Due Date)[^\d\w]{0,15}([A-Za-z]+\s+\d{1,2},?\s+\d{4}|\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4})/i);
+      let dueDay = null;
+      if (dueDateMatch) {
+        const d = new Date(dueDateMatch[1]);
+        if (!isNaN(d.getTime())) dueDay = d.getDate();
+      }
+
+      const isLikelyCreditCardOrLoan = /credit|card|loan|mortgage|statement balance|total amount due/i.test(fullText) || parsedBalance > 500;
+
+      return {
+        documentType: 'statement',
+        institution: '',
+        accountType: isLikelyCreditCardOrLoan ? 'Credit Card' : 'Checking',
+        category: isLikelyCreditCardOrLoan ? 'Liability' : 'Asset',
+        accountNumberMasked: parsedAcct,
+        balance: parsedBalance,
+        interestRate: isLikelyCreditCardOrLoan ? parsedAPR : 0,
+        statementDate,
+        dueDay,
+        confidence: 'low',
+        recurringCharges: []
+      };
+    };
+
+    const buildWealthStrategySystemPrompt = () => `You are a careful, conservative personal wealth strategist reviewing a household's local financial snapshot (their own account balances, APRs, recurring expenses, and net worth history — all provided below as JSON). You are not a licensed financial advisor.
+
+Return ONLY a raw JSON object (no markdown fences, no commentary) with these exact fields:
+{
+  "headline": string,
+  "strengths": [string, ...],
+  "risks": [string, ...],
+  "strategies": [
+    { "title": string, "priority": "high" | "medium" | "low", "rationale": string, "action": string, "estimatedImpact": string }
+  ],
+  "cashflowNotes": string
+}
+
+Rules:
+- Base every observation strictly on the JSON data given to you. Do not invent accounts, balances, or figures not present in the data.
+- "headline" is a one or two sentence plain-language summary of the household's overall financial position right now.
+- "strengths" and "risks" are short, specific bullet observations (3-6 each) grounded in the actual numbers (e.g. specific APRs, specific category totals, specific cashflow figures).
+- "strategies" is an ordered list of 3-6 concrete, actionable recommendations (debt payoff order, emergency fund sizing, high-yield cash sweep, expense category concerns, etc.), each with a clear priority.
+- "cashflowNotes" should end with a brief plain-language disclaimer that this is not professional financial or tax advice and the user should confirm significant moves with a licensed advisor.
+- Output must be valid JSON and nothing else.`;
+
+    const normalizeRecurringCharges = (list) => {
+      if (!Array.isArray(list)) return [];
+      return list
+        .filter(rc => rc && rc.name && parseFloat(rc.amount) > 0)
+        .map((rc, idx) => ({
+          uid: 'rc_' + Date.now() + '_' + idx,
+          name: rc.name,
+          amount: parseFloat(rc.amount) || 0,
+          category: CATEGORIES.includes(rc.category) ? rc.category : autoCategorize(rc.name),
+          dueDay: rc.dueDay || null,
+          include: true
+        }));
+    };
+
+    const fileToDataUrl = (file) => new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result);
+      reader.onerror = reject;
+      reader.readAsDataURL(file);
+    });
+
+    function App() {
+      const [activeTab, setActiveTab] = useState('vault');
+      const [records, setRecords] = useState([]);
+      const [expenses, setExpenses] = useState([]);
+      const [documents, setDocuments] = useState([]);
+      const [contacts, setContacts] = useState([]);
+      const [networthHistory, setNetworthHistory] = useState([]);
+      const [monthlyIncome, setMonthlyIncome] = useState(10000);
+      const [groqApiKey, setGroqApiKey] = useState('');
+      const [textModel, setTextModel] = useState(DEFAULT_TEXT_MODEL);
+      const [visionModel, setVisionModel] = useState(DEFAULT_VISION_MODEL);
+      const [staleDays, setStaleDays] = useState(DEFAULT_STALE_DAYS);
+      const [notes, setNotes] = useState('');
+      const [parsing, setParsing] = useState(false);
+      const [parseError, setParseError] = useState('');
+
+      const [strategyReport, setStrategyReport] = useState(null);
+      const [strategyLoading, setStrategyLoading] = useState(false);
+      const [strategyError, setStrategyError] = useState('');
+
+      const [availableModels, setAvailableModels] = useState([]);
+      const [modelsFetching, setModelsFetching] = useState(false);
+      const [modelsFetchError, setModelsFetchError] = useState('');
+
+      const [installPromptEvent, setInstallPromptEvent] = useState(null);
+      const [isAppInstalled, setIsAppInstalled] = useState(false);
+
+      const replaceInputRef = useRef(null);
+      const [replaceTargetAccountId, setReplaceTargetAccountId] = useState(null);
+
+      // FILTER STATES FOR EXPENSES
+      const [expenseCategoryFilter, setExpenseCategoryFilter] = useState('All');
+      const [expenseSearchQuery, setExpenseSearchQuery] = useState('');
+
+      // MODALS
+      const [pendingParsedData, setPendingParsedData] = useState(null);
+      const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+      const [viewingDocument, setViewingDocument] = useState(null);
+
+      const [form, setForm] = useState({
+        institution: '',
+        accountType: 'Checking',
+        category: 'Asset',
+        accountNumberMasked: '',
+        balance: '',
+        interestRate: '0'
+      });
+
+      const [expForm, setExpForm] = useState({
+        name: '',
+        category: 'Housing/Mortgage',
+        amount: '',
+        dueDay: '1',
+        autoPay: true
+      });
+
+      const [contactForm, setContactForm] = useState({
+        name: '', role: '', phone: '', email: '', notes: ''
+      });
+      const [editingContactId, setEditingContactId] = useState(null);
+
+      useEffect(() => {
+        loadAllData();
+        const savedNotes = localStorage.getItem('executor_notes');
+        const savedIncome = localStorage.getItem('monthly_income');
+        const savedKey = localStorage.getItem('groq_api_key');
+        const savedTextModel = localStorage.getItem('groq_text_model');
+        const savedVisionModel = localStorage.getItem('groq_vision_model');
+        const savedStaleDays = localStorage.getItem('stale_days_threshold');
+        if (savedNotes) setNotes(savedNotes);
+        if (savedIncome) setMonthlyIncome(parseFloat(savedIncome) || 10000);
+        if (savedKey) setGroqApiKey(savedKey);
+        if (savedTextModel) setTextModel(savedTextModel);
+        if (savedVisionModel) setVisionModel(savedVisionModel);
+        if (savedStaleDays) setStaleDays(parseInt(savedStaleDays, 10) || DEFAULT_STALE_DAYS);
+        const savedReport = localStorage.getItem('wealth_strategy_report');
+        if (savedReport) {
+          try { setStrategyReport(JSON.parse(savedReport)); } catch (e) { /* ignore corrupt cache */ }
+        }
+
+        if (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches) {
+          setIsAppInstalled(true);
+        }
+      }, []);
+
+      useEffect(() => {
+        const handleBeforeInstallPrompt = (e) => {
+          e.preventDefault();
+          setInstallPromptEvent(e);
+        };
+        const handleAppInstalled = () => {
+          setIsAppInstalled(true);
+          setInstallPromptEvent(null);
+        };
+        window.addEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
+        window.addEventListener('appinstalled', handleAppInstalled);
+        return () => {
+          window.removeEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
+          window.removeEventListener('appinstalled', handleAppInstalled);
+        };
+      }, []);
+
+      const handleInstallClick = async () => {
+        if (!installPromptEvent) return;
+        installPromptEvent.prompt();
+        await installPromptEvent.userChoice;
+        setInstallPromptEvent(null);
+      };
+
+      useEffect(() => {
+        if (window.lucide) window.lucide.createIcons();
+      }, [records, expenses, documents, contacts, activeTab, parsing, pendingParsedData, isSettingsOpen, viewingDocument, expenseCategoryFilter, expenseSearchQuery, strategyReport, strategyLoading, installPromptEvent]);
+
+      const loadAllData = async () => {
+        try {
+          const recData = await getDBItems(STORES.ACCOUNTS);
+          const expData = await getDBItems(STORES.EXPENSES);
+          const docData = await getDBItems(STORES.DOCUMENTS);
+          const contactData = await getDBItems(STORES.CONTACTS);
+          const historyData = await getDBItems(STORES.NETWORTH_HISTORY);
+          setRecords(recData);
+          setExpenses(expData);
+          setDocuments(docData);
+          setContacts(contactData);
+          setNetworthHistory(historyData.sort((a, b) => a.date.localeCompare(b.date)));
+          takeNetWorthSnapshot(recData);
+        } catch (err) {
+          console.error('Failed to load DB:', err);
+        }
+      };
+
+      const takeNetWorthSnapshot = async (recData) => {
+        const totalAssets = recData.filter(r => r.category === 'Asset').reduce((a, r) => a + r.balance, 0);
+        const totalLiabilities = recData.filter(r => r.category !== 'Asset').reduce((a, r) => a + r.balance, 0);
+        const today = isoToday();
+        try {
+          const existing = await getDBItem(STORES.NETWORTH_HISTORY, today);
+          const snapshot = {
+            date: today,
+            totalAssets,
+            totalLiabilities,
+            netWorth: totalAssets - totalLiabilities
+          };
+          if (!existing || existing.netWorth !== snapshot.netWorth) {
+            await saveDBItem(STORES.NETWORTH_HISTORY, snapshot);
+            setNetworthHistory(prev => {
+              const filtered = prev.filter(h => h.date !== today);
+              return [...filtered, snapshot].sort((a, b) => a.date.localeCompare(b.date));
+            });
+          }
+        } catch (err) {
+          console.error('Failed to snapshot net worth:', err);
+        }
+      };
+
+      const handleAddRecord = async (e) => {
+        e.preventDefault();
+        if (!form.institution || !form.balance) return;
+
+        const newRecord = {
+          id: 'rec_' + Date.now(),
+          institution: form.institution,
+          accountType: form.accountType,
+          category: form.category,
+          accountNumberMasked: form.accountNumberMasked || 'N/A',
+          balance: parseFloat(form.balance) || 0,
+          interestRate: parseFloat(form.interestRate) || 0,
+          statementDate: '',
+          notes: '',
+          documentId: null,
+          updatedAt: new Date().toISOString()
+        };
+
+        await saveDBItem(STORES.ACCOUNTS, newRecord);
+        setForm({ institution: '', accountType: 'Checking', category: 'Asset', accountNumberMasked: '', balance: '', interestRate: '0' });
+        loadAllData();
+      };
+
+      const handleAddExpense = async (e) => {
+        e.preventDefault();
+        if (!expForm.name || !expForm.amount) return;
+
+        const newExp = {
+          id: 'exp_' + Date.now(),
+          name: expForm.name,
+          category: expForm.category,
+          amount: parseFloat(expForm.amount) || 0,
+          dueDay: parseInt(expForm.dueDay, 10) || 1,
+          autoPay: expForm.autoPay
+        };
+
+        await saveDBItem(STORES.EXPENSES, newExp);
+        setExpForm({ name: '', category: 'Housing/Mortgage', amount: '', dueDay: '1', autoPay: true });
+        loadAllData();
+      };
+
+      const handleExpenseNameChange = (nameVal) => {
+        const detectedCat = autoCategorize(nameVal);
+        setExpForm(prev => ({ ...prev, name: nameVal, category: detectedCat }));
+      };
+
+      // Open the verification/edit modal for an EXISTING account record
+      const openEditAccount = (rec) => {
+        setPendingParsedData({
+          fileName: null,
+          existingAccountId: rec.id,
+          documentId: rec.documentId || null,
+          newFile: null,
+          institution: rec.institution,
+          accountType: rec.accountType,
+          category: rec.category,
+          accountNumberMasked: rec.accountNumberMasked,
+          balance: rec.balance,
+          interestRate: rec.interestRate,
+          statementDate: rec.statementDate || '',
+          notes: rec.notes || '',
+          recurringCharges: []
+        });
+      };
+
+      const handleConfirmPendingParsedData = async (e) => {
+        e.preventDefault();
+        if (!pendingParsedData) return;
+
+        const isEdit = !!pendingParsedData.existingAccountId;
+        const recordToSave = {
+          id: isEdit ? pendingParsedData.existingAccountId : 'rec_' + Date.now(),
+          institution: pendingParsedData.institution,
+          accountType: pendingParsedData.accountType,
+          category: pendingParsedData.category,
+          accountNumberMasked: pendingParsedData.accountNumberMasked || 'N/A',
+          balance: parseFloat(pendingParsedData.balance) || 0,
+          interestRate: parseFloat(pendingParsedData.interestRate) || 0,
+          statementDate: pendingParsedData.statementDate || '',
+          notes: pendingParsedData.notes || '',
+          documentId: pendingParsedData.documentId || null,
+          updatedAt: new Date().toISOString()
+        };
+
+        // If a new file was attached during this session, store it as a document
+        if (pendingParsedData.newFile) {
+          const docId = 'doc_' + Date.now();
+          const docRecord = {
+            id: docId,
+            accountId: recordToSave.id,
+            fileName: pendingParsedData.newFile.fileName,
+            mimeType: pendingParsedData.newFile.mimeType,
+            dataUrl: pendingParsedData.newFile.dataUrl,
+            docType: pendingParsedData.documentType || 'statement',
+            uploadedAt: new Date().toISOString()
+          };
+          await saveDBItem(STORES.DOCUMENTS, docRecord);
+          recordToSave.documentId = docId;
+        }
+
+        await saveDBItem(STORES.ACCOUNTS, recordToSave);
+
+        // Sort any detected recurring charges into the Budget & Expenses tab
+        if (Array.isArray(pendingParsedData.recurringCharges)) {
+          const included = pendingParsedData.recurringCharges.filter(rc => rc.include);
+          for (let i = 0; i < included.length; i++) {
+            const rc = included[i];
+            await saveDBItem(STORES.EXPENSES, {
+              id: 'exp_' + Date.now() + '_' + i,
+              name: rc.name,
+              category: CATEGORIES.includes(rc.category) ? rc.category : 'Other',
+              amount: parseFloat(rc.amount) || 0,
+              dueDay: parseInt(rc.dueDay, 10) || 1,
+              autoPay: true
+            });
+          }
+        }
+
+        setPendingParsedData(null);
+        setParseError('');
+        loadAllData();
+      };
+
+      const handleDeleteRecord = async (id) => {
+        if (!confirm('Delete this account and its linked document(s) from the vault?')) return;
+        const linkedDocs = documents.filter(d => d.accountId === id);
+        for (const d of linkedDocs) await deleteDBItem(STORES.DOCUMENTS, d.id);
+        await deleteDBItem(STORES.ACCOUNTS, id);
+        loadAllData();
+      };
+
+      const handleDeleteExpense = async (id) => {
+        await deleteDBItem(STORES.EXPENSES, id);
+        loadAllData();
+      };
+
+      const handleSaveApiKey = (keyVal) => {
+        setGroqApiKey(keyVal);
+        localStorage.setItem('groq_api_key', keyVal);
+      };
+
+      const handleSaveTextModel = (val) => {
+        setTextModel(val);
+        localStorage.setItem('groq_text_model', val);
+      };
+
+      const handleSaveVisionModel = (val) => {
+        setVisionModel(val);
+        localStorage.setItem('groq_vision_model', val);
+      };
+
+      const handleFetchModels = async () => {
+        if (!groqApiKey) {
+          setModelsFetchError('Enter a Groq API key above first.');
+          return;
+        }
+        setModelsFetching(true);
+        setModelsFetchError('');
+        try {
+          const ids = await fetchGroqModels(groqApiKey);
+          setAvailableModels(ids);
+          if (ids.length === 0) setModelsFetchError('No models returned for this key.');
+        } catch (err) {
+          console.error('Failed to fetch Groq models:', err);
+          setModelsFetchError(err.message);
+        } finally {
+          setModelsFetching(false);
+        }
+      };
+
+      const handleSaveStaleDays = (val) => {
+        const n = parseInt(val, 10) || DEFAULT_STALE_DAYS;
+        setStaleDays(n);
+        localStorage.setItem('stale_days_threshold', n);
+      };
+
+      const handleIncomeChange = (e) => {
+        const val = parseFloat(e.target.value) || 0;
+        setMonthlyIncome(val);
+        localStorage.setItem('monthly_income', val);
+      };
+
+      const handleNotesChange = (e) => {
+        setNotes(e.target.value);
+        localStorage.setItem('executor_notes', e.target.value);
+      };
+
+      // ---------------- CONTACTS ----------------
+      const handleContactSubmit = async (e) => {
+        e.preventDefault();
+        if (!contactForm.name) return;
+        const record = {
+          id: editingContactId || 'contact_' + Date.now(),
+          ...contactForm
+        };
+        await saveDBItem(STORES.CONTACTS, record);
+        setContactForm({ name: '', role: '', phone: '', email: '', notes: '' });
+        setEditingContactId(null);
+        loadAllData();
+      };
+
+      const handleEditContact = (c) => {
+        setContactForm({ name: c.name, role: c.role, phone: c.phone, email: c.email, notes: c.notes });
+        setEditingContactId(c.id);
+      };
+
+      const handleDeleteContact = async (id) => {
+        await deleteDBItem(STORES.CONTACTS, id);
+        if (editingContactId === id) {
+          setEditingContactId(null);
+          setContactForm({ name: '', role: '', phone: '', email: '', notes: '' });
+        }
+        loadAllData();
+      };
+
+      // ---------------- BACKUP / RESTORE ----------------
+      const exportJsonBackup = async () => {
+        const backupData = {
+          version: '4.0',
+          exportedAt: new Date().toISOString(),
+          monthlyIncome,
+          notes,
+          records,
+          expenses,
+          documents,
+          contacts,
+          networthHistory
+        };
+
+        const jsonStr = JSON.stringify(backupData, null, 2);
+        const blob = new Blob([jsonStr], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `Financial_Vault_Backup_${new Date().toISOString().slice(0, 10)}.json`;
+        a.click();
+        URL.revokeObjectURL(url);
+      };
+
+      const handleRestoreBackup = (e) => {
+        const file = e.target.files[0];
+        if (!file) return;
+
+        const reader = new FileReader();
+        reader.onload = async (evt) => {
+          try {
+            const data = JSON.parse(evt.target.result);
+            if (data.records && Array.isArray(data.records)) {
+              await clearStore(STORES.ACCOUNTS);
+              for (const rec of data.records) await saveDBItem(STORES.ACCOUNTS, rec);
+            }
+            if (data.expenses && Array.isArray(data.expenses)) {
+              await clearStore(STORES.EXPENSES);
+              for (const exp of data.expenses) await saveDBItem(STORES.EXPENSES, exp);
+            }
+            if (data.documents && Array.isArray(data.documents)) {
+              await clearStore(STORES.DOCUMENTS);
+              for (const doc of data.documents) await saveDBItem(STORES.DOCUMENTS, doc);
+            }
+            if (data.contacts && Array.isArray(data.contacts)) {
+              await clearStore(STORES.CONTACTS);
+              for (const c of data.contacts) await saveDBItem(STORES.CONTACTS, c);
+            }
+            if (data.networthHistory && Array.isArray(data.networthHistory)) {
+              await clearStore(STORES.NETWORTH_HISTORY);
+              for (const h of data.networthHistory) await saveDBItem(STORES.NETWORTH_HISTORY, h);
+            }
+            if (data.monthlyIncome) {
+              setMonthlyIncome(data.monthlyIncome);
+              localStorage.setItem('monthly_income', data.monthlyIncome);
+            }
+            if (data.notes) {
+              setNotes(data.notes);
+              localStorage.setItem('executor_notes', data.notes);
+            }
+            await loadAllData();
+            alert('Vault restored successfully!');
+            setIsSettingsOpen(false);
+          } catch (err) {
+            console.error('Failed to restore backup:', err);
+            alert('Invalid backup JSON file.');
+          }
+        };
+        reader.readAsText(file);
+      };
+
+      const handlePurgeDatabase = async () => {
+        if (confirm('Are you sure you want to completely erase all accounts, documents, contacts, and expenses from this device?')) {
+          await clearStore(STORES.ACCOUNTS);
+          await clearStore(STORES.EXPENSES);
+          await clearStore(STORES.DOCUMENTS);
+          await clearStore(STORES.CONTACTS);
+          await clearStore(STORES.NETWORTH_HISTORY);
+          localStorage.removeItem('executor_notes');
+          localStorage.removeItem('monthly_income');
+          setNotes('');
+          setMonthlyIncome(10000);
+          await loadAllData();
+          setIsSettingsOpen(false);
+        }
+      };
+
+      // ---------------- FILE UPLOAD / AI PARSING ----------------
+      const handleFileUpload = async (e, existingAccountId) => {
+        const file = e.target.files[0];
+        if (!file) return;
+        setParsing(true);
+        setParseError('');
+
+        const fileNameClean = file.name.replace(/\.[^/.]+$/, "").toUpperCase();
+        const isCSV = file.type === 'text/csv' || file.name.endsWith('.csv');
+        const isPDF = file.type === 'application/pdf' || file.name.endsWith('.pdf');
+        const isImage = file.type.startsWith('image/');
+
+        try {
+          if (isCSV) {
+            const dataUrl = await fileToDataUrl(file);
+            Papa.parse(file, {
+              complete: (results) => {
+                let detectedBalance = 0;
+                let latestDate = '';
+                results.data.forEach((row) => {
+                  Object.values(row).forEach((v) => {
+                    const num = parseFloat(v);
+                    if (!isNaN(num) && num > 0 && num > detectedBalance) detectedBalance = num;
+                    if (typeof v === 'string' && /\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4}/.test(v)) {
+                      const iso = normalizeToISODate(v);
+                      if (iso && (!latestDate || iso > latestDate)) latestDate = iso;
+                    }
+                  });
+                });
+
+                setPendingParsedData({
+                  fileName: file.name,
+                  existingAccountId: existingAccountId || null,
+                  documentId: existingAccountId ? (records.find(r => r.id === existingAccountId) || {}).documentId : null,
+                  newFile: { fileName: file.name, mimeType: file.type || 'text/csv', dataUrl },
+                  documentType: 'statement',
+                  institution: fileNameClean,
+                  accountType: 'Credit Card',
+                  category: 'Liability',
+                  accountNumberMasked: 'Parsed CSV',
+                  balance: detectedBalance || 0,
+                  interestRate: 19.99,
+                  statementDate: latestDate,
+                  notes: existingAccountId ? (records.find(r => r.id === existingAccountId) || {}).notes || '' : '',
+                  recurringCharges: []
+                });
+                setParsing(false);
+              }
+            });
+          } else if (isPDF) {
+            const dataUrl = await fileToDataUrl(file);
+            const arrayBuf = await file.arrayBuffer();
+            const typedArray = new Uint8Array(arrayBuf);
+            const pdf = await pdfjsLib.getDocument(typedArray).promise;
+            let fullText = '';
+            for (let i = 1; i <= pdf.numPages; i++) {
+              const page = await pdf.getPage(i);
+              const textContent = await page.getTextContent();
+              fullText += textContent.items.map((item) => item.str).join(' ') + ' ';
+            }
+
+            let extracted = null;
+            if (groqApiKey) {
+              try {
+                extracted = await extractWithGroqText(fullText, groqApiKey, textModel);
+              } catch (err) {
+                console.error('Groq extraction failed, falling back to regex:', err);
+                setParseError('AI parsing failed (' + err.message + '). Falling back to basic extraction — please double-check the fields below. If this says a model doesn\'t exist or isn\'t accessible, go to Settings and use "Fetch Models" to pick one your key can actually use.');
+              }
+            }
+            if (!extracted) extracted = regexExtractFromText(fullText);
+
+            setPendingParsedData({
+              fileName: file.name,
+              existingAccountId: existingAccountId || null,
+              documentId: existingAccountId ? (records.find(r => r.id === existingAccountId) || {}).documentId : null,
+              newFile: { fileName: file.name, mimeType: 'application/pdf', dataUrl },
+              documentType: extracted.documentType || 'statement',
+              institution: extracted.institution || fileNameClean,
+              accountType: extracted.accountType || 'Checking',
+              category: extracted.category || 'Asset',
+              accountNumberMasked: extracted.accountNumberMasked || '',
+              balance: extracted.balance || 0,
+              interestRate: extracted.interestRate || 0,
+              statementDate: extracted.statementDate || '',
+              dueDay: extracted.dueDay || null,
+              notes: existingAccountId ? (records.find(r => r.id === existingAccountId) || {}).notes || '' : '',
+              recurringCharges: normalizeRecurringCharges(extracted.recurringCharges)
+            });
+            setParsing(false);
+          } else if (isImage) {
+            const dataUrl = await fileToDataUrl(file);
+            let extracted = null;
+            if (groqApiKey) {
+              try {
+                extracted = await extractWithGroqVision(dataUrl, groqApiKey, visionModel);
+              } catch (err) {
+                console.error('Groq vision extraction failed:', err);
+                setParseError('AI image parsing failed (' + err.message + '). Enter the details manually below — the image is still saved as a document. If this says a model doesn\'t exist or isn\'t accessible, go to Settings and use "Fetch Models" to pick one your key can actually use.');
+              }
+            } else {
+              setParseError('No Groq API key set, so this image could not be auto-read. Add a key in Settings, or enter the details manually below — the image is still saved as a document.');
+            }
+            if (!extracted) {
+              extracted = {
+                documentType: 'other',
+                institution: fileNameClean,
+                accountType: 'Checking',
+                category: 'Asset',
+                accountNumberMasked: '',
+                balance: 0,
+                interestRate: 0,
+                statementDate: '',
+                dueDay: null
+              };
+            }
+
+            setPendingParsedData({
+              fileName: file.name,
+              existingAccountId: existingAccountId || null,
+              documentId: existingAccountId ? (records.find(r => r.id === existingAccountId) || {}).documentId : null,
+              newFile: { fileName: file.name, mimeType: file.type, dataUrl },
+              documentType: extracted.documentType || 'other',
+              institution: extracted.institution || fileNameClean,
+              accountType: extracted.accountType || 'Checking',
+              category: extracted.category || 'Asset',
+              accountNumberMasked: extracted.accountNumberMasked || '',
+              balance: extracted.balance || 0,
+              interestRate: extracted.interestRate || 0,
+              statementDate: extracted.statementDate || '',
+              notes: existingAccountId ? (records.find(r => r.id === existingAccountId) || {}).notes || '' : '',
+              recurringCharges: normalizeRecurringCharges(extracted.recurringCharges)
+            });
+            setParsing(false);
+          } else {
+            alert('Unsupported file type. Please upload a PDF, CSV, or image (JPG/PNG).');
+            setParsing(false);
+          }
+        } catch (err) {
+          console.error('Error handling upload:', err);
+          setParseError('Could not process this file: ' + err.message);
+          setParsing(false);
+        } finally {
+          e.target.value = '';
+        }
+      };
+
+      const triggerReplaceUpload = (accountId) => {
+        setReplaceTargetAccountId(accountId);
+        if (replaceInputRef.current) replaceInputRef.current.click();
+      };
+
+      const handleReplaceFileSelected = (e) => {
+        handleFileUpload(e, replaceTargetAccountId);
+        setReplaceTargetAccountId(null);
+      };
+
+      // ---------------- DERIVED DATA ----------------
+      const totalAssets = records.filter(r => r.category === 'Asset').reduce((acc, r) => acc + r.balance, 0);
+      const totalLiabilities = records.filter(r => r.category !== 'Asset').reduce((acc, r) => acc + r.balance, 0);
+      const netWorth = totalAssets - totalLiabilities;
+      const totalFixedExpenses = expenses.reduce((acc, e) => acc + e.amount, 0);
+      const monthlyNetCashflow = monthlyIncome - totalFixedExpenses;
+
+      const filteredExpenses = expenses.filter(exp => {
+        const matchesCat = expenseCategoryFilter === 'All' || exp.category === expenseCategoryFilter;
+        const matchesQuery = exp.name.toLowerCase().includes(expenseSearchQuery.toLowerCase());
+        return matchesCat && matchesQuery;
+      });
+
+      const highInterestDebts = records.filter(r => r.category !== 'Asset' && r.interestRate >= 10);
+      const liquidCash = records.filter(r => r.category === 'Asset' && r.interestRate < 2);
+
+      const staleAccounts = records
+        .map(r => ({ ...r, staleness: getStaleness(r.statementDate, staleDays) }))
+        .filter(r => r.staleness.isStale)
+        .sort((a, b) => (b.staleness.age || 9999) - (a.staleness.age || 9999));
+
+      const upcomingBills = expenses
+        .map(exp => {
+          const nextDate = nextOccurrenceOfDay(exp.dueDay);
+          return { ...exp, nextDate, daysUntil: daysUntil(nextDate) };
+        })
+        .filter(exp => exp.nextDate && exp.daysUntil <= 14)
+        .sort((a, b) => a.daysUntil - b.daysUntil);
+
+      const dueSoonTotal = upcomingBills.filter(b => b.daysUntil <= 7).reduce((a, b) => a + b.amount, 0);
+
+      const getDocumentForAccount = (accountId) => documents.find(d => d.accountId === accountId);
+
+      // Continuity readiness checklist
+      const accountsWithDocs = records.filter(r => r.documentId).length;
+      const accountsCurrent = records.filter(r => !getStaleness(r.statementDate, staleDays).isStale).length;
+      const readinessItems = [
+        { label: 'Executor / handoff notes written', done: notes.trim().length > 0 },
+        { label: 'At least one key contact added', done: contacts.length > 0 },
+        { label: `Accounts with a document on file (${accountsWithDocs}/${records.length || 0})`, done: records.length > 0 && accountsWithDocs === records.length },
+        { label: `Accounts with a current statement (${accountsCurrent}/${records.length || 0})`, done: records.length > 0 && accountsCurrent === records.length }
+      ];
+
+      // ---------------- PDF EXPORT ----------------
+      const generateExecutorPDF = () => {
+        const doc = new jsPDF();
+
+        doc.setFontSize(20);
+        doc.text('OFFLINE ESTATE, BUDGET & FINANCIAL SNAPSHOT', 14, 20);
+        doc.setFontSize(10);
+        doc.text(`Generated: ${new Date().toLocaleString()} | Client-Side Vault`, 14, 27);
+        doc.line(14, 30, 196, 30);
+
+        let y = 40;
+        doc.setFontSize(14);
+        doc.text('Executor & Settlement Instructions', 14, y);
+        y += 7;
+        doc.setFontSize(10);
+        const splitNotes = doc.splitTextToSize(notes || 'No specific executor instructions provided.', 180);
+        doc.text(splitNotes, 14, y);
+        y += (splitNotes.length * 5) + 8;
+
+        if (contacts.length > 0) {
+          if (y > 250) { doc.addPage(); y = 20; }
+          doc.setFontSize(14);
+          doc.text('Key Contacts', 14, y);
+          y += 7;
+          doc.setFontSize(9);
+          contacts.forEach(c => {
+            if (y > 275) { doc.addPage(); y = 20; }
+            doc.text(`${c.name}${c.role ? ' (' + c.role + ')' : ''} — ${c.phone || ''} ${c.email || ''}`, 14, y);
+            y += 5;
+          });
+          y += 6;
+        }
+
+        if (y > 250) { doc.addPage(); y = 20; }
+        doc.setFontSize(14);
+        doc.text('Account Ledger & Strategic Balance', 14, y);
+        y += 8;
+
+        doc.setFontSize(8);
+        doc.text('Institution', 14, y);
+        doc.text('Type', 55, y);
+        doc.text('Acct #', 82, y);
+        doc.text('APR', 108, y);
+        doc.text('Balance', 128, y);
+        doc.text('Stmt Date', 155, y);
+        doc.text('Doc?', 182, y);
+        y += 4;
+        doc.line(14, y, 196, y);
+        y += 6;
+
+        let totalAssetsPdf = 0;
+        let totalLiabilitiesPdf = 0;
+
+        records.forEach((rec) => {
+          if (y > 270) { doc.addPage(); y = 20; }
+          doc.text(String(rec.institution).slice(0, 22), 14, y);
+          doc.text(rec.accountType, 55, y);
+          doc.text(rec.accountNumberMasked || 'N/A', 82, y);
+          doc.text(`${rec.interestRate}%`, 108, y);
+          doc.text(`$${rec.balance.toLocaleString('en-US', { minimumFractionDigits: 2 })}`, 128, y);
+          doc.text(rec.statementDate || 'Unknown', 155, y);
+          doc.text(rec.documentId ? 'Yes' : 'No', 182, y);
+
+          if (rec.category === 'Asset') totalAssetsPdf += rec.balance;
+          else totalLiabilitiesPdf += rec.balance;
+
+          y += 6;
+        });
+
+        const accountsWithNotes = records.filter(r => r.notes && r.notes.trim());
+        if (accountsWithNotes.length > 0) {
+          y += 4;
+          if (y > 260) { doc.addPage(); y = 20; }
+          doc.setFontSize(11);
+          doc.text('Account Notes', 14, y);
+          y += 6;
+          doc.setFontSize(8);
+          accountsWithNotes.forEach(r => {
+            if (y > 275) { doc.addPage(); y = 20; }
+            const lines = doc.splitTextToSize(`${r.institution}: ${r.notes}`, 180);
+            doc.text(lines, 14, y);
+            y += lines.length * 4 + 2;
+          });
+        }
+
+        y += 4;
+        if (y > 260) { doc.addPage(); y = 20; }
+        doc.line(14, y, 196, y);
+        y += 8;
+
+        const totalFixedExpensesPdf = expenses.reduce((a, b) => a + b.amount, 0);
+
+        doc.setFontSize(11);
+        doc.text(`Total Liquid & Fixed Assets: $${totalAssetsPdf.toLocaleString('en-US', { minimumFractionDigits: 2 })}`, 14, y);
+        y += 6;
+        doc.text(`Total Debt Liabilities: $${totalLiabilitiesPdf.toLocaleString('en-US', { minimumFractionDigits: 2 })}`, 14, y);
+        y += 6;
+        doc.text(`Net Estate Settlement Value: $${(totalAssetsPdf - totalLiabilitiesPdf).toLocaleString('en-US', { minimumFractionDigits: 2 })}`, 14, y);
+        y += 6;
+        doc.text(`Monthly Recurring Expenses: $${totalFixedExpensesPdf.toLocaleString('en-US', { minimumFractionDigits: 2 })}`, 14, y);
+        y += 10;
+
+        if (upcomingBills.length > 0) {
+          if (y > 250) { doc.addPage(); y = 20; }
+          doc.setFontSize(12);
+          doc.text('Bills Due Within 14 Days', 14, y);
+          y += 6;
+          doc.setFontSize(9);
+          upcomingBills.forEach(b => {
+            if (y > 275) { doc.addPage(); y = 20; }
+            doc.text(`${b.name} — $${b.amount.toLocaleString('en-US', { minimumFractionDigits: 2 })} — due in ${b.daysUntil} day(s) (day ${b.dueDay})`, 14, y);
+            y += 5;
+          });
+        }
+
+        doc.save('Estate_Financial_Settlement_Snapshot.pdf');
+      };
+
+      // ---------------- WEALTH STRATEGY (GROQ GOALS REPORT) ----------------
+      const generateWealthStrategy = async () => {
+        if (!groqApiKey) {
+          setStrategyError('Add a Groq API key in Settings to generate a wealth strategy report.');
+          return;
+        }
+        setStrategyLoading(true);
+        setStrategyError('');
+        try {
+          const payload = {
+            monthlyIncome,
+            monthlyNetCashflow,
+            totalAssets,
+            totalLiabilities,
+            netWorth,
+            accounts: records.map(r => ({
+              institution: r.institution,
+              type: r.accountType,
+              category: r.category,
+              balance: r.balance,
+              interestRate: r.interestRate,
+              statementAgeDays: getStaleness(r.statementDate, staleDays).age
+            })),
+            monthlyExpensesByCategory: CATEGORIES.map(c => ({
+              category: c,
+              total: expenses.filter(e => e.category === c).reduce((a, e) => a + e.amount, 0)
+            })).filter(c => c.total > 0),
+            netWorthHistory: networthHistory.slice(-12).map(h => ({ date: h.date, netWorth: h.netWorth }))
+          };
+
+          const result = await callGroq(groqApiKey, {
+            model: textModel,
+            temperature: 0.3,
+            response_format: { type: 'json_object' },
+            messages: [
+              { role: 'system', content: buildWealthStrategySystemPrompt() },
+              { role: 'user', content: JSON.stringify(payload) }
+            ]
+          });
+
+          if (!result) throw new Error('Could not parse the AI response.');
+
+          const report = { ...result, generatedAt: new Date().toISOString() };
+          setStrategyReport(report);
+          localStorage.setItem('wealth_strategy_report', JSON.stringify(report));
+        } catch (err) {
+          console.error('Wealth strategy generation failed:', err);
+          setStrategyError('Report generation failed: ' + err.message + ' — if this says a model doesn\'t exist or isn\'t accessible, go to Settings and use "Fetch Models" to pick one your key can actually use.');
+        } finally {
+          setStrategyLoading(false);
+        }
+      };
+
+      const generateStrategyPDF = () => {
+        if (!strategyReport) return;
+        const doc = new jsPDF();
+
+        doc.setFontSize(18);
+        doc.text('Wealth Strategy Report', 14, 20);
+        doc.setFontSize(9);
+        doc.text(`Generated: ${new Date(strategyReport.generatedAt).toLocaleString()}`, 14, 27);
+        doc.line(14, 30, 196, 30);
+
+        let y = 40;
+        doc.setFontSize(12);
+        const headlineLines = doc.splitTextToSize(strategyReport.headline || '', 180);
+        doc.text(headlineLines, 14, y);
+        y += headlineLines.length * 6 + 8;
+
+        if (strategyReport.strengths && strategyReport.strengths.length) {
+          if (y > 250) { doc.addPage(); y = 20; }
+          doc.setFontSize(12);
+          doc.text('Strengths', 14, y);
+          y += 6;
+          doc.setFontSize(9);
+          strategyReport.strengths.forEach(s => {
+            if (y > 270) { doc.addPage(); y = 20; }
+            const lines = doc.splitTextToSize('• ' + s, 180);
+            doc.text(lines, 14, y);
+            y += lines.length * 5 + 2;
+          });
+          y += 4;
+        }
+
+        if (strategyReport.risks && strategyReport.risks.length) {
+          if (y > 250) { doc.addPage(); y = 20; }
+          doc.setFontSize(12);
+          doc.text('Risks', 14, y);
+          y += 6;
+          doc.setFontSize(9);
+          strategyReport.risks.forEach(s => {
+            if (y > 270) { doc.addPage(); y = 20; }
+            const lines = doc.splitTextToSize('• ' + s, 180);
+            doc.text(lines, 14, y);
+            y += lines.length * 5 + 2;
+          });
+          y += 4;
+        }
+
+        if (strategyReport.strategies && strategyReport.strategies.length) {
+          if (y > 240) { doc.addPage(); y = 20; }
+          doc.setFontSize(12);
+          doc.text('Recommended Strategies', 14, y);
+          y += 7;
+          strategyReport.strategies.forEach((s, i) => {
+            if (y > 255) { doc.addPage(); y = 20; }
+            doc.setFontSize(10);
+            doc.text(`${i + 1}. ${s.title || ''} [${(s.priority || 'medium').toUpperCase()}]`, 14, y);
+            y += 5;
+            doc.setFontSize(8);
+            if (s.rationale) {
+              const ratLines = doc.splitTextToSize(`Why: ${s.rationale}`, 178);
+              if (y > 275) { doc.addPage(); y = 20; }
+              doc.text(ratLines, 18, y);
+              y += ratLines.length * 4 + 1;
+            }
+            if (s.action) {
+              const actLines = doc.splitTextToSize(`Action: ${s.action}`, 178);
+              if (y > 275) { doc.addPage(); y = 20; }
+              doc.text(actLines, 18, y);
+              y += actLines.length * 4 + 1;
+            }
+            if (s.estimatedImpact) {
+              const impLines = doc.splitTextToSize(`Estimated impact: ${s.estimatedImpact}`, 178);
+              if (y > 275) { doc.addPage(); y = 20; }
+              doc.text(impLines, 18, y);
+              y += impLines.length * 4 + 1;
+            }
+            y += 3;
+          });
+        }
+
+        if (strategyReport.cashflowNotes) {
+          if (y > 250) { doc.addPage(); y = 20; }
+          doc.setFontSize(12);
+          doc.text('Cashflow Notes', 14, y);
+          y += 6;
+          doc.setFontSize(8);
+          const lines = doc.splitTextToSize(strategyReport.cashflowNotes, 180);
+          doc.text(lines, 14, y);
+        }
+
+        doc.save('Wealth_Strategy_Report.pdf');
+      };
+
+      // ---------------- SMALL COMPONENTS ----------------
+      const StaleBadge = ({ statementDate }) => {
+        const s = getStaleness(statementDate, staleDays);
+        if (!s.known) {
+          return <span className="text-[10px] bg-slate-700 text-slate-400 px-1.5 py-0.5 rounded">No date on file</span>;
+        }
+        if (s.isStale) {
+          return <span className="text-[10px] bg-rose-500/10 text-rose-400 px-1.5 py-0.5 rounded">{s.age}d old — update</span>;
+        }
+        return <span className="text-[10px] bg-emerald-500/10 text-emerald-400 px-1.5 py-0.5 rounded">Current ({s.age}d)</span>;
+      };
+
+      const NetWorthChart = () => {
+        if (networthHistory.length < 2) {
+          return <p className="text-xs text-slate-400">Net worth trend will appear here once at least two days of vault activity are recorded.</p>;
+        }
+        const w = 100;
+        const values = networthHistory.map(entry => entry.netWorth);
+        const min = Math.min(...values);
+        const max = Math.max(...values);
+        const range = (max - min) || 1;
+        const pts = networthHistory.map((entry, i) => {
+          const x = (i / (networthHistory.length - 1)) * w;
+          const yVal = 34 - ((entry.netWorth - min) / range) * 34;
+          return `${x},${yVal}`;
+        }).join(' ');
+        const first = networthHistory[0];
+        const last = networthHistory[networthHistory.length - 1];
+        const delta = last.netWorth - first.netWorth;
+        return (
+          <div>
+            <svg viewBox="0 0 100 34" className="w-full h-20" preserveAspectRatio="none">
+              <polyline points={pts} fill="none" stroke={delta >= 0 ? '#34d399' : '#fb7185'} strokeWidth="1.5" vectorEffect="non-scaling-stroke" />
+            </svg>
+            <div className="flex justify-between text-[10px] text-slate-400 mt-1">
+              <span>{first.date}: ${first.netWorth.toLocaleString('en-US', { maximumFractionDigits: 0 })}</span>
+              <span className={delta >= 0 ? 'text-emerald-400' : 'text-rose-400'}>
+                {delta >= 0 ? '+' : ''}{delta.toLocaleString('en-US', { maximumFractionDigits: 0 })} since first snapshot
+              </span>
+              <span>{last.date}: ${last.netWorth.toLocaleString('en-US', { maximumFractionDigits: 0 })}</span>
+            </div>
+          </div>
+        );
+      };
+
+      return (
+        <div className="p-6">
+          <div className="max-w-6xl mx-auto space-y-6">
+
+            {/* HEADER */}
+            <header className="no-print flex flex-col md:flex-row md:items-center justify-between bg-slate-800 p-6 rounded-xl border border-slate-700 shadow-lg">
+              <div className="flex items-center space-x-3 mb-4 md:mb-0">
+                <div className="p-3 bg-emerald-500/10 text-emerald-400 rounded-lg border border-emerald-500/20">
+                  <i data-lucide="shield" className="w-8 h-8"></i>
+                </div>
+                <div>
+                  <h1 className="text-xl font-bold tracking-wide">Financial Vault & Capital Allocator</h1>
+                  <p className="text-xs text-slate-400 flex items-center gap-1 mt-0.5">
+                    <i data-lucide="lock" className="w-3 h-3 text-emerald-400"></i> Local Storage • Budgeting & Capital Flow
+                  </p>
+                </div>
+              </div>
+              <div className="flex gap-3">
+                {installPromptEvent && !isAppInstalled && (
+                  <button
+                    onClick={handleInstallClick}
+                    className="flex items-center gap-2 bg-slate-700 hover:bg-slate-600 text-slate-200 px-4 py-2.5 rounded-lg text-sm font-medium transition"
+                    title="Install as an app"
+                  >
+                    <i data-lucide="download" className="w-4 h-4"></i> Install App
+                  </button>
+                )}
+                <button
+                  onClick={() => setIsSettingsOpen(true)}
+                  className="flex items-center justify-center p-2.5 bg-slate-700 hover:bg-slate-600 text-slate-200 rounded-lg transition"
+                  title="Vault Settings & API Keys"
+                >
+                  <i data-lucide="settings" className="w-5 h-5"></i>
+                </button>
+                <button
+                  onClick={generateExecutorPDF}
+                  className="flex items-center gap-2 bg-emerald-600 hover:bg-emerald-500 text-white px-5 py-2.5 rounded-lg font-medium transition shadow-md"
+                >
+                  <i data-lucide="download" className="w-4 h-4"></i> Export Settlement PDF
+                </button>
+              </div>
+            </header>
+
+            {/* hidden input used for "Replace Document" actions from the ledger table */}
+            <input type="file" accept=".pdf,.csv,image/*" ref={replaceInputRef} onChange={handleReplaceFileSelected} className="hidden no-print" />
+
+            {/* TAB NAVIGATION */}
+            <div className="no-print flex border-b border-slate-700 gap-4 text-sm font-medium overflow-x-auto">
+              <button
+                onClick={() => setActiveTab('vault')}
+                className={`pb-3 flex items-center gap-2 border-b-2 transition whitespace-nowrap ${activeTab === 'vault' ? 'border-emerald-500 text-emerald-400' : 'border-transparent text-slate-400 hover:text-slate-200'}`}
+              >
+                <i data-lucide="database" className="w-4 h-4"></i> Asset & Liability Vault
+              </button>
+              <button
+                onClick={() => setActiveTab('budget')}
+                className={`pb-3 flex items-center gap-2 border-b-2 transition whitespace-nowrap ${activeTab === 'budget' ? 'border-emerald-500 text-emerald-400' : 'border-transparent text-slate-400 hover:text-slate-200'}`}
+              >
+                <i data-lucide="pie-chart" className="w-4 h-4"></i> Budget & Expenses
+              </button>
+              <button
+                onClick={() => setActiveTab('allocation')}
+                className={`pb-3 flex items-center gap-2 border-b-2 transition whitespace-nowrap ${activeTab === 'allocation' ? 'border-emerald-500 text-emerald-400' : 'border-transparent text-slate-400 hover:text-slate-200'}`}
+              >
+                <i data-lucide="trending-up" className="w-4 h-4"></i> Strategic Capital Allocation
+              </button>
+              <button
+                onClick={() => setActiveTab('continuity')}
+                className={`pb-3 flex items-center gap-2 border-b-2 transition whitespace-nowrap ${activeTab === 'continuity' ? 'border-emerald-500 text-emerald-400' : 'border-transparent text-slate-400 hover:text-slate-200'}`}
+              >
+                <i data-lucide="life-buoy" className="w-4 h-4"></i> Continuity Plan
+              </button>
+              <button
+                onClick={() => setActiveTab('strategy')}
+                className={`pb-3 flex items-center gap-2 border-b-2 transition whitespace-nowrap ${activeTab === 'strategy' ? 'border-emerald-500 text-emerald-400' : 'border-transparent text-slate-400 hover:text-slate-200'}`}
+              >
+                <i data-lucide="sparkles" className="w-4 h-4"></i> Wealth Strategy
+              </button>
+            </div>
+
+            {/* TOP METRICS */}
+            <div className="no-print grid grid-cols-1 md:grid-cols-5 gap-4">
+              <div className="bg-slate-800 p-4 rounded-xl border border-slate-700">
+                <span className="text-[10px] uppercase text-slate-400 font-semibold tracking-wider">Total Assets</span>
+                <div className="text-xl font-bold text-emerald-400 mt-1">
+                  ${totalAssets.toLocaleString('en-US', { minimumFractionDigits: 2 })}
+                </div>
+              </div>
+              <div className="bg-slate-800 p-4 rounded-xl border border-slate-700">
+                <span className="text-[10px] uppercase text-slate-400 font-semibold tracking-wider">Total Liabilities</span>
+                <div className="text-xl font-bold text-rose-400 mt-1">
+                  ${totalLiabilities.toLocaleString('en-US', { minimumFractionDigits: 2 })}
+                </div>
+              </div>
+              <div className="bg-slate-800 p-4 rounded-xl border border-slate-700">
+                <span className="text-[10px] uppercase text-slate-400 font-semibold tracking-wider">Net Worth</span>
+                <div className={`text-xl font-bold mt-1 ${netWorth >= 0 ? 'text-blue-400' : 'text-rose-500'}`}>
+                  ${netWorth.toLocaleString('en-US', { minimumFractionDigits: 2 })}
+                </div>
+              </div>
+              <div className="bg-slate-800 p-4 rounded-xl border border-slate-700">
+                <span className="text-[10px] uppercase text-slate-400 font-semibold tracking-wider">Monthly Expenses</span>
+                <div className="text-xl font-bold text-amber-400 mt-1">
+                  ${totalFixedExpenses.toLocaleString('en-US', { minimumFractionDigits: 2 })}
+                </div>
+              </div>
+              <div className="bg-slate-800 p-4 rounded-xl border border-slate-700">
+                <span className="text-[10px] uppercase text-slate-400 font-semibold tracking-wider">Due Within 7 Days</span>
+                <div className="text-xl font-bold text-orange-400 mt-1">
+                  ${dueSoonTotal.toLocaleString('en-US', { minimumFractionDigits: 2 })}
+                </div>
+              </div>
+            </div>
+
+            {/* NET WORTH TREND */}
+            <div className="no-print bg-slate-800 p-5 rounded-xl border border-slate-700">
+              <h2 className="text-sm font-semibold uppercase tracking-wider text-slate-300 mb-3 flex items-center gap-2">
+                <i data-lucide="line-chart" className="w-4 h-4 text-emerald-400"></i> Net Worth Trend
+              </h2>
+              <NetWorthChart />
+            </div>
+
+            {/* STALE STATEMENT BANNER */}
+            {staleAccounts.length > 0 && (
+              <div className="no-print bg-amber-950/30 border border-amber-800/50 rounded-xl p-4">
+                <h3 className="text-xs font-bold text-amber-400 uppercase tracking-wider flex items-center gap-2 mb-2">
+                  <i data-lucide="alert-triangle" className="w-4 h-4"></i> {staleAccounts.length} account(s) need a current statement
+                </h3>
+                <div className="space-y-1.5">
+                  {staleAccounts.map(a => (
+                    <div key={a.id} className="flex items-center justify-between text-xs bg-slate-900/40 rounded-lg px-3 py-2">
+                      <span className="text-slate-200">{a.institution} <span className="text-slate-500">— {a.staleness.known ? `${a.staleness.age} days old` : 'no statement date on file'}</span></span>
+                      <button onClick={() => triggerReplaceUpload(a.id)} className="text-emerald-400 hover:text-emerald-300 font-medium flex items-center gap-1">
+                        <i data-lucide="upload" className="w-3 h-3"></i> Upload Current Statement
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {parseError && (
+              <div className="no-print bg-rose-950/30 border border-rose-800/50 rounded-xl p-3 text-xs text-rose-300 flex justify-between items-start gap-3">
+                <span>{parseError}</span>
+                <button onClick={() => setParseError('')} className="text-rose-400 hover:text-rose-200">✕</button>
+              </div>
+            )}
+
+            {/* TAB 1: ASSET & LIABILITY VAULT */}
+            {activeTab === 'vault' && (
+              <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                <div className="space-y-6">
+                  <div className="bg-slate-800 p-5 rounded-xl border border-slate-700 space-y-3">
+                    <h2 className="text-sm font-semibold uppercase tracking-wider text-slate-300 flex items-center gap-2">
+                      <i data-lucide="upload" className="w-4 h-4 text-emerald-400"></i> Ingest Statement (PDF / CSV / Image)
+                    </h2>
+                    <div className="border-2 border-dashed border-slate-600 rounded-lg p-6 text-center hover:border-emerald-500 transition cursor-pointer relative bg-slate-800/50">
+                      <input type="file" accept=".pdf,.csv,image/*" onChange={(e) => handleFileUpload(e)} className="absolute inset-0 w-full h-full opacity-0 cursor-pointer" />
+                      <i data-lucide="file-text" className="w-8 h-8 mx-auto text-slate-400 mb-2"></i>
+                      <p className="text-xs text-slate-300 font-medium">{parsing ? 'Extracting & analyzing...' : 'Drop a statement PDF, CSV, or photo'}</p>
+                      <p className="text-[10px] text-slate-500 mt-1">{groqApiKey ? `AI parsing via Groq (${textModel})` : 'No AI key set — using offline rule-based parsing'}</p>
+                    </div>
+                  </div>
+
+                  <form onSubmit={handleAddRecord} className="bg-slate-800 p-5 rounded-xl border border-slate-700 space-y-3">
+                    <h2 className="text-sm font-semibold uppercase tracking-wider text-slate-300 flex items-center gap-2">
+                      <i data-lucide="plus" className="w-4 h-4 text-emerald-400"></i> Manual Record Entry
+                    </h2>
+                    <input type="text" placeholder="Institution (e.g., Chase, Mortgage Servicer)" value={form.institution} onChange={(e) => setForm({ ...form, institution: e.target.value })} className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-100" required />
+
+                    <div className="grid grid-cols-2 gap-2">
+                      <select value={form.accountType} onChange={(e) => setForm({ ...form, accountType: e.target.value })} className="bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-100">
+                        <option>Checking</option><option>Savings</option><option>Credit Card</option><option>Mortgage</option><option>Brokerage</option><option>Auto Loan</option>
+                      </select>
+                      <select value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value })} className="bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-100">
+                        <option value="Asset">Asset (+)</option><option value="Liability">Liability (-)</option>
+                      </select>
+                    </div>
+
+                    <div className="grid grid-cols-3 gap-2">
+                      <input type="text" placeholder="Acct Mask (****1234)" value={form.accountNumberMasked} onChange={(e) => setForm({ ...form, accountNumberMasked: e.target.value })} className="col-span-1 bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-100" />
+                      <input type="number" step="0.01" placeholder="Balance ($)" value={form.balance} onChange={(e) => setForm({ ...form, balance: e.target.value })} className="col-span-1 bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-100" required />
+                      <input type="number" step="0.1" placeholder="APR / Interest %" value={form.interestRate} onChange={(e) => setForm({ ...form, interestRate: e.target.value })} className="col-span-1 bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-100" />
+                    </div>
+
+                    <button type="submit" className="w-full bg-slate-700 hover:bg-slate-600 text-slate-100 font-medium py-2 rounded-lg text-xs transition">Save Account to Vault</button>
+                  </form>
+                </div>
+
+                <div className="lg:col-span-2 space-y-6">
+                  <div className="bg-slate-800 rounded-xl border border-slate-700 p-5 shadow-lg">
+                    <h2 className="text-sm font-semibold uppercase tracking-wider text-slate-300 mb-4">Accounts & Debt Ledger</h2>
+                    {records.length === 0 ? (
+                      <div className="text-center py-8 text-slate-500 text-xs">No accounts logged yet. Upload a statement or add a record.</div>
+                    ) : (
+                      <div className="overflow-x-auto">
+                        <table className="w-full text-left text-xs">
+                          <thead>
+                            <tr className="border-b border-slate-700 text-slate-400 uppercase">
+                              <th className="pb-2">Institution</th><th className="pb-2">Type</th><th className="pb-2">APR %</th><th className="pb-2">Balance</th><th className="pb-2">Statement</th><th className="pb-2 text-right">Actions</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-slate-700/50">
+                            {records.map((rec) => {
+                              const linkedDoc = getDocumentForAccount(rec.id);
+                              return (
+                                <tr key={rec.id} className="hover:bg-slate-700/30">
+                                  <td className="py-2.5 font-medium text-slate-200">{rec.institution}</td>
+                                  <td className="py-2.5 text-slate-400">{rec.accountType}</td>
+                                  <td className="py-2.5 text-slate-400">{rec.interestRate}%</td>
+                                  <td className={`py-2.5 font-bold ${rec.category === 'Asset' ? 'text-emerald-400' : 'text-rose-400'}`}>
+                                    ${rec.balance.toLocaleString('en-US', { minimumFractionDigits: 2 })}
+                                  </td>
+                                  <td className="py-2.5"><StaleBadge statementDate={rec.statementDate} /></td>
+                                  <td className="py-2.5 text-right whitespace-nowrap">
+                                    {linkedDoc && (
+                                      <button onClick={() => setViewingDocument(linkedDoc)} title="View document" className="text-slate-500 hover:text-blue-400 mr-2"><i data-lucide="paperclip" className="w-4 h-4 inline"></i></button>
+                                    )}
+                                    <button onClick={() => triggerReplaceUpload(rec.id)} title="Replace / upload statement" className="text-slate-500 hover:text-emerald-400 mr-2"><i data-lucide="upload" className="w-4 h-4 inline"></i></button>
+                                    <button onClick={() => openEditAccount(rec)} title="Edit" className="text-slate-500 hover:text-amber-400 mr-2"><i data-lucide="pencil" className="w-4 h-4 inline"></i></button>
+                                    <button onClick={() => handleDeleteRecord(rec.id)} title="Delete" className="text-slate-500 hover:text-rose-400"><i data-lucide="trash-2" className="w-4 h-4 inline"></i></button>
+                                  </td>
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* TAB 2: BUDGET & EXPENSES */}
+            {activeTab === 'budget' && (
+              <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                <div className="space-y-6">
+                  <div className="bg-slate-800 p-5 rounded-xl border border-slate-700 space-y-3">
+                    <h2 className="text-sm font-semibold uppercase tracking-wider text-slate-300">Monthly Net Income</h2>
+                    <input type="number" value={monthlyIncome} onChange={handleIncomeChange} className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm text-emerald-400 font-bold" />
+                    <p className="text-[10px] text-slate-400">Baseline net take-home pay for calculating surplus liquidity.</p>
+                  </div>
+
+                  <form onSubmit={handleAddExpense} className="bg-slate-800 p-5 rounded-xl border border-slate-700 space-y-3">
+                    <h2 className="text-sm font-semibold uppercase tracking-wider text-slate-300 flex items-center gap-2">
+                      <i data-lucide="plus" className="w-4 h-4 text-emerald-400"></i> Add Recurring Expense
+                    </h2>
+                    <div>
+                      <label className="text-[10px] text-slate-400 block mb-1">Expense Name (Auto-Categorizes)</label>
+                      <input
+                        type="text"
+                        placeholder="e.g. Duke Energy, Netflix, Chase Mortgage"
+                        value={expForm.name}
+                        onChange={(e) => handleExpenseNameChange(e.target.value)}
+                        className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-100"
+                        required
+                      />
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-2">
+                      <div>
+                        <label className="text-[10px] text-slate-400 block mb-1">Category</label>
+                        <select value={expForm.category} onChange={(e) => setExpForm({ ...expForm, category: e.target.value })} className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-100">
+                          {CATEGORIES.map(c => <option key={c}>{c}</option>)}
+                        </select>
+                      </div>
+                      <div>
+                        <label className="text-[10px] text-slate-400 block mb-1">Amount ($)</label>
+                        <input type="number" step="0.01" placeholder="0.00" value={expForm.amount} onChange={(e) => setExpForm({ ...expForm, amount: e.target.value })} className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-100" required />
+                      </div>
+                    </div>
+
+                    <div className="flex items-center justify-between pt-1">
+                      <div className="w-1/2">
+                        <label className="text-[10px] text-slate-400 block mb-1">Due Day of Month</label>
+                        <input type="number" min="1" max="31" placeholder="1-31" value={expForm.dueDay} onChange={(e) => setExpForm({ ...expForm, dueDay: e.target.value })} className="bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-100 w-full" />
+                      </div>
+                      <label className="text-xs text-slate-300 flex items-center gap-2 cursor-pointer">
+                        <input type="checkbox" checked={expForm.autoPay} onChange={(e) => setExpForm({ ...expForm, autoPay: e.target.checked })} className="rounded bg-slate-900 border-slate-700 text-emerald-500" /> AutoPay
+                      </label>
+                    </div>
+
+                    <button type="submit" className="w-full bg-slate-700 hover:bg-slate-600 text-slate-100 font-medium py-2 rounded-lg text-xs transition">Add Expense</button>
+                  </form>
+
+                  {upcomingBills.length > 0 && (
+                    <div className="bg-slate-800 p-5 rounded-xl border border-slate-700 space-y-2">
+                      <h2 className="text-sm font-semibold uppercase tracking-wider text-slate-300 flex items-center gap-2">
+                        <i data-lucide="calendar-clock" className="w-4 h-4 text-orange-400"></i> Due Within 14 Days
+                      </h2>
+                      <div className="space-y-1.5">
+                        {upcomingBills.map(b => (
+                          <div key={b.id} className="flex justify-between items-center text-xs bg-slate-900/50 rounded-lg px-3 py-2">
+                            <span className="text-slate-200">{b.name}</span>
+                            <span className={`font-mono ${b.daysUntil <= 3 ? 'text-rose-400' : 'text-amber-400'}`}>
+                              {b.daysUntil === 0 ? 'Today' : `${b.daysUntil}d`} · ${b.amount.toLocaleString('en-US', { minimumFractionDigits: 2 })}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                <div className="lg:col-span-2 space-y-4">
+                  <div className="bg-slate-800 rounded-xl border border-slate-700 p-4 flex flex-col md:flex-row gap-3 items-center justify-between">
+                    <div className="relative w-full md:w-1/2">
+                      <input
+                        type="text"
+                        placeholder="Search expenses..."
+                        value={expenseSearchQuery}
+                        onChange={(e) => setExpenseSearchQuery(e.target.value)}
+                        className="w-full bg-slate-900 border border-slate-700 rounded-lg pl-8 pr-3 py-1.5 text-xs text-slate-100 focus:outline-none focus:border-emerald-500"
+                      />
+                      <i data-lucide="search" className="w-3.5 h-3.5 text-slate-500 absolute left-2.5 top-2.5"></i>
+                    </div>
+
+                    <div className="flex items-center gap-2 w-full md:w-auto">
+                      <span className="text-xs text-slate-400 whitespace-nowrap">Category:</span>
+                      <select
+                        value={expenseCategoryFilter}
+                        onChange={(e) => setExpenseCategoryFilter(e.target.value)}
+                        className="bg-slate-900 border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-slate-100 focus:outline-none focus:border-emerald-500 w-full md:w-auto"
+                      >
+                        <option value="All">All Categories ({expenses.length})</option>
+                        {CATEGORIES.map(c => <option key={c} value={c}>{c}</option>)}
+                      </select>
+                    </div>
+                  </div>
+
+                  <div className="bg-slate-800 rounded-xl border border-slate-700 p-5 shadow-lg">
+                    <h2 className="text-sm font-semibold uppercase tracking-wider text-slate-300 mb-4 flex justify-between items-center">
+                      <span>Monthly Fixed Obligations</span>
+                      <span className="text-xs font-normal text-slate-400">Showing {filteredExpenses.length} of {expenses.length}</span>
+                    </h2>
+                    {filteredExpenses.length === 0 ? (
+                      <div className="text-center py-8 text-slate-500 text-xs">No matching expenses found.</div>
+                    ) : (
+                      <div className="overflow-x-auto">
+                        <table className="w-full text-left text-xs">
+                          <thead>
+                            <tr className="border-b border-slate-700 text-slate-400 uppercase">
+                              <th className="pb-2">Name</th><th className="pb-2">Category</th><th className="pb-2">Due Day</th><th className="pb-2">AutoPay</th><th className="pb-2">Amount</th><th className="pb-2 text-right">Action</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-slate-700/50">
+                            {filteredExpenses.map((exp) => (
+                              <tr key={exp.id} className="hover:bg-slate-700/30">
+                                <td className="py-2.5 font-medium text-slate-200">{exp.name}</td>
+                                <td className="py-2.5"><span className="bg-slate-700/80 px-2 py-0.5 rounded text-[10px] text-slate-300">{exp.category}</span></td>
+                                <td className="py-2.5 text-slate-400">{exp.dueDay ? `Day ${exp.dueDay}` : '—'}</td>
+                                <td className="py-2.5">{exp.autoPay ? <span className="text-emerald-400 font-semibold">Active</span> : <span className="text-slate-500">Manual</span>}</td>
+                                <td className="py-2.5 font-bold text-amber-400">${exp.amount.toLocaleString('en-US', { minimumFractionDigits: 2 })}</td>
+                                <td className="py-2.5 text-right">
+                                  <button onClick={() => handleDeleteExpense(exp.id)} className="text-slate-500 hover:text-rose-400"><i data-lucide="trash-2" className="w-4 h-4"></i></button>
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* TAB 3: STRATEGIC CAPITAL ALLOCATION */}
+            {activeTab === 'allocation' && (
+              <div className="space-y-6">
+                <div className="bg-slate-800 p-6 rounded-xl border border-slate-700 space-y-4">
+                  <h2 className="text-base font-bold text-emerald-400 flex items-center gap-2">
+                    <i data-lucide="zap" className="w-5 h-5"></i> Capital Optimization Engine
+                  </h2>
+                  <p className="text-xs text-slate-300">
+                    Automated client-side recommendations derived from your account balances, APRs, and net monthly surplus cashflow (${monthlyNetCashflow.toLocaleString()}).
+                  </p>
+
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-2">
+                    <div className="p-4 bg-slate-900/80 rounded-lg border border-slate-700 space-y-2">
+                      <div className="flex items-center justify-between">
+                        <span className="text-xs font-bold text-rose-400 uppercase tracking-wider flex items-center gap-1.5">
+                          <i data-lucide="alert-triangle" className="w-4 h-4"></i> High APR Debt Target
+                        </span>
+                        <span className="text-[10px] bg-rose-500/10 text-rose-400 px-2 py-0.5 rounded font-mono">Avalanche Strategy</span>
+                      </div>
+                      {highInterestDebts.length > 0 ? (
+                        <div>
+                          <p className="text-xs text-slate-300">
+                            You have <strong className="text-rose-400">{highInterestDebts.length} high-interest accounts</strong> (≥10% APR).
+                          </p>
+                          <ul className="mt-2 space-y-1 text-xs">
+                            {highInterestDebts.map(d => (
+                              <li key={d.id} className="flex justify-between text-slate-400 border-b border-slate-800 pb-1">
+                                <span>{d.institution} ({d.interestRate}% APR)</span>
+                                <span className="text-slate-200 font-bold">${d.balance.toLocaleString()}</span>
+                              </li>
+                            ))}
+                          </ul>
+                          <p className="text-[11px] text-emerald-400 mt-3">
+                            👉 Recommended Action: Allocate 80% of monthly surplus (${(monthlyNetCashflow * 0.8).toFixed(0)}/mo) directly to paying down {highInterestDebts[0].institution}.
+                          </p>
+                        </div>
+                      ) : (
+                        <p className="text-xs text-slate-400">No high-interest debts (≥10% APR) detected. Excellent efficiency.</p>
+                      )}
+                    </div>
+
+                    <div className="p-4 bg-slate-900/80 rounded-lg border border-slate-700 space-y-2">
+                      <div className="flex items-center justify-between">
+                        <span className="text-xs font-bold text-blue-400 uppercase tracking-wider flex items-center gap-1.5">
+                          <i data-lucide="arrow-right-left" className="w-4 h-4"></i> Yield Optimization
+                        </span>
+                        <span className="text-[10px] bg-blue-500/10 text-blue-400 px-2 py-0.5 rounded font-mono">Yield Sweep</span>
+                      </div>
+                      {liquidCash.length > 0 ? (
+                        <div>
+                          <p className="text-xs text-slate-300">
+                            Found <strong className="text-blue-400 font-mono">${liquidCash.reduce((a,b)=>a+b.balance,0).toLocaleString()}</strong> sitting in low-yield accounts (&lt;2% APR).
+                          </p>
+                          <p className="text-[11px] text-slate-400 mt-2">
+                            Emergency Reserve Threshold (3x Expenses): <strong className="text-slate-200">${(totalFixedExpenses * 3).toLocaleString()}</strong>
+                          </p>
+                          <p className="text-[11px] text-emerald-400 mt-3">
+                            👉 Recommended Action: Keep ${(totalFixedExpenses * 3).toLocaleString()} liquid for safety; move remaining surplus into High-Yield Savings (4.5%+) or index funds.
+                          </p>
+                        </div>
+                      ) : (
+                        <p className="text-xs text-slate-400">All liquid cash is efficiently deployed.</p>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* TAB 4: CONTINUITY PLAN */}
+            {activeTab === 'continuity' && (
+              <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                <div className="space-y-6">
+                  <form onSubmit={handleContactSubmit} className="bg-slate-800 p-5 rounded-xl border border-slate-700 space-y-3">
+                    <h2 className="text-sm font-semibold uppercase tracking-wider text-slate-300 flex items-center gap-2">
+                      <i data-lucide="users" className="w-4 h-4 text-emerald-400"></i> {editingContactId ? 'Edit Contact' : 'Add Key Contact'}
+                    </h2>
+                    <input type="text" placeholder="Name" value={contactForm.name} onChange={(e) => setContactForm({ ...contactForm, name: e.target.value })} className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-100" required />
+                    <input type="text" placeholder="Role (e.g., Estate Attorney, CPA, Advisor)" value={contactForm.role} onChange={(e) => setContactForm({ ...contactForm, role: e.target.value })} className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-100" />
+                    <div className="grid grid-cols-2 gap-2">
+                      <input type="text" placeholder="Phone" value={contactForm.phone} onChange={(e) => setContactForm({ ...contactForm, phone: e.target.value })} className="bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-100" />
+                      <input type="text" placeholder="Email" value={contactForm.email} onChange={(e) => setContactForm({ ...contactForm, email: e.target.value })} className="bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-100" />
+                    </div>
+                    <textarea rows="2" placeholder="Notes (when to call, what they handle...)" value={contactForm.notes} onChange={(e) => setContactForm({ ...contactForm, notes: e.target.value })} className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-100" />
+                    <div className="flex gap-2">
+                      <button type="submit" className="flex-1 bg-slate-700 hover:bg-slate-600 text-slate-100 font-medium py-2 rounded-lg text-xs transition">{editingContactId ? 'Save Changes' : 'Add Contact'}</button>
+                      {editingContactId && (
+                        <button type="button" onClick={() => { setEditingContactId(null); setContactForm({ name: '', role: '', phone: '', email: '', notes: '' }); }} className="px-3 bg-slate-900 border border-slate-700 rounded-lg text-xs text-slate-300">Cancel</button>
+                      )}
+                    </div>
+                  </form>
+
+                  <div className="bg-slate-800 p-5 rounded-xl border border-slate-700 space-y-2">
+                    <h2 className="text-sm font-semibold uppercase tracking-wider text-slate-300">Readiness Checklist</h2>
+                    <p className="text-[10px] text-slate-500 mb-2">If someone had to take this over tomorrow, here's what's ready.</p>
+                    <div className="space-y-1.5">
+                      {readinessItems.map((item, i) => (
+                        <div key={i} className="flex items-center gap-2 text-xs">
+                          <i data-lucide={item.done ? 'check-circle' : 'circle'} className={`w-4 h-4 ${item.done ? 'text-emerald-400' : 'text-slate-600'}`}></i>
+                          <span className={item.done ? 'text-slate-300' : 'text-slate-500'}>{item.label}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+
+                <div className="lg:col-span-2 space-y-6">
+                  <div className="bg-slate-800 p-5 rounded-xl border border-slate-700 space-y-2">
+                    <h2 className="text-sm font-semibold uppercase tracking-wider text-slate-300">Executor / Handoff Instructions</h2>
+                    <textarea rows="4" value={notes} onChange={handleNotesChange} placeholder="Key safe locations, estate attorney info, account handling directives, login/password manager location, safe deposit box..." className="w-full bg-slate-900 border border-slate-700 rounded-lg p-2.5 text-xs text-slate-200 focus:outline-none focus:border-emerald-500" />
+                  </div>
+
+                  <div className="bg-slate-800 rounded-xl border border-slate-700 p-5 shadow-lg">
+                    <h2 className="text-sm font-semibold uppercase tracking-wider text-slate-300 mb-4">Key Contacts</h2>
+                    {contacts.length === 0 ? (
+                      <div className="text-center py-6 text-slate-500 text-xs">No contacts added yet.</div>
+                    ) : (
+                      <div className="space-y-2">
+                        {contacts.map(c => (
+                          <div key={c.id} className="flex items-center justify-between bg-slate-900/50 rounded-lg px-3 py-2 text-xs">
+                            <div>
+                              <span className="font-medium text-slate-200">{c.name}</span>
+                              {c.role && <span className="text-slate-500"> — {c.role}</span>}
+                              <div className="text-slate-400">{c.phone} {c.email}</div>
+                            </div>
+                            <div className="flex gap-2">
+                              <button onClick={() => handleEditContact(c)} className="text-slate-500 hover:text-amber-400"><i data-lucide="pencil" className="w-4 h-4"></i></button>
+                              <button onClick={() => handleDeleteContact(c.id)} className="text-slate-500 hover:text-rose-400"><i data-lucide="trash-2" className="w-4 h-4"></i></button>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="bg-slate-800 rounded-xl border border-slate-700 p-5 shadow-lg">
+                    <h2 className="text-sm font-semibold uppercase tracking-wider text-slate-300 mb-2">Account Notes</h2>
+                    <p className="text-[10px] text-slate-500 mb-3">Per-account notes (edit an account in the Vault tab to add one) — login location, who to call, special instructions.</p>
+                    {records.filter(r => r.notes && r.notes.trim()).length === 0 ? (
+                      <div className="text-center py-6 text-slate-500 text-xs">No account notes yet.</div>
+                    ) : (
+                      <div className="space-y-2">
+                        {records.filter(r => r.notes && r.notes.trim()).map(r => (
+                          <div key={r.id} className="bg-slate-900/50 rounded-lg px-3 py-2 text-xs">
+                            <span className="font-medium text-slate-200">{r.institution}: </span>
+                            <span className="text-slate-400">{r.notes}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* TAB 5: WEALTH STRATEGY (GROQ GOALS REPORT) */}
+            {activeTab === 'strategy' && (
+              <div className="space-y-6">
+                <div className="no-print bg-slate-800 p-6 rounded-xl border border-slate-700 flex flex-col md:flex-row md:items-center justify-between gap-4">
+                  <div>
+                    <h2 className="text-base font-bold text-emerald-400 flex items-center gap-2">
+                      <i data-lucide="sparkles" className="w-5 h-5"></i> Wealth Strategy Report
+                    </h2>
+                    <p className="text-xs text-slate-400 mt-1">
+                      {strategyReport
+                        ? `Last generated ${new Date(strategyReport.generatedAt).toLocaleString()}`
+                        : 'AI review of your accounts, spending, and net worth trend — with strategies to consider.'}
+                    </p>
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    <button
+                      onClick={generateWealthStrategy}
+                      disabled={strategyLoading}
+                      className="flex items-center gap-2 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white px-4 py-2 rounded-lg text-xs font-medium transition"
+                    >
+                      <i data-lucide={strategyLoading ? 'loader' : 'zap'} className="w-4 h-4"></i>
+                      {strategyLoading ? 'Analyzing...' : strategyReport ? 'Regenerate Report' : 'Generate Report'}
+                    </button>
+                    {strategyReport && (
+                      <React.Fragment>
+                        <button onClick={generateStrategyPDF} className="flex items-center gap-2 bg-slate-700 hover:bg-slate-600 text-slate-100 px-4 py-2 rounded-lg text-xs font-medium transition">
+                          <i data-lucide="download" className="w-4 h-4"></i> Export PDF
+                        </button>
+                        <button onClick={() => window.print()} className="flex items-center gap-2 bg-slate-700 hover:bg-slate-600 text-slate-100 px-4 py-2 rounded-lg text-xs font-medium transition">
+                          <i data-lucide="printer" className="w-4 h-4"></i> Print
+                        </button>
+                      </React.Fragment>
+                    )}
+                  </div>
+                </div>
+
+                {!groqApiKey && (
+                  <div className="no-print bg-amber-950/30 border border-amber-800/50 rounded-xl p-4 text-xs text-amber-300 flex items-center justify-between gap-3">
+                    <span>This report needs a Groq API key to analyze your data.</span>
+                    <button onClick={() => setIsSettingsOpen(true)} className="text-emerald-400 hover:text-emerald-300 font-medium whitespace-nowrap">Open Settings</button>
+                  </div>
+                )}
+
+                {strategyError && (
+                  <div className="no-print bg-rose-950/30 border border-rose-800/50 rounded-xl p-3 text-xs text-rose-300 flex justify-between items-start gap-3">
+                    <span>{strategyError}</span>
+                    <button onClick={() => setStrategyError('')} className="text-rose-400 hover:text-rose-200">✕</button>
+                  </div>
+                )}
+
+                {strategyReport ? (
+                  <div id="strategy-report-print" className="space-y-4">
+                    <div className="bg-slate-800 p-5 rounded-xl border border-slate-700">
+                      <h3 className="text-sm font-semibold uppercase tracking-wider text-slate-300 mb-2">Overview</h3>
+                      <p className="text-sm text-slate-200">{strategyReport.headline}</p>
+                    </div>
+
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                      <div className="bg-slate-800 p-5 rounded-xl border border-slate-700">
+                        <h3 className="text-xs font-bold text-emerald-400 uppercase tracking-wider mb-2 flex items-center gap-1.5">
+                          <i data-lucide="thumbs-up" className="w-4 h-4"></i> Strengths
+                        </h3>
+                        <ul className="space-y-1.5 text-xs text-slate-300 list-disc list-inside">
+                          {(strategyReport.strengths || []).map((s, i) => <li key={i}>{s}</li>)}
+                        </ul>
+                      </div>
+                      <div className="bg-slate-800 p-5 rounded-xl border border-slate-700">
+                        <h3 className="text-xs font-bold text-rose-400 uppercase tracking-wider mb-2 flex items-center gap-1.5">
+                          <i data-lucide="alert-triangle" className="w-4 h-4"></i> Risks
+                        </h3>
+                        <ul className="space-y-1.5 text-xs text-slate-300 list-disc list-inside">
+                          {(strategyReport.risks || []).map((s, i) => <li key={i}>{s}</li>)}
+                        </ul>
+                      </div>
+                    </div>
+
+                    <div className="bg-slate-800 p-5 rounded-xl border border-slate-700 space-y-3">
+                      <h3 className="text-xs font-bold text-blue-400 uppercase tracking-wider flex items-center gap-1.5">
+                        <i data-lucide="target" className="w-4 h-4"></i> Strategies to Consider
+                      </h3>
+                      {(strategyReport.strategies || []).map((s, i) => {
+                        const priorityColor = s.priority === 'high' ? 'text-rose-400 bg-rose-500/10' : s.priority === 'low' ? 'text-slate-400 bg-slate-500/10' : 'text-amber-400 bg-amber-500/10';
+                        return (
+                          <div key={i} className="p-3 bg-slate-900/60 rounded-lg border border-slate-700 space-y-1">
+                            <div className="flex items-center justify-between">
+                              <span className="text-xs font-semibold text-slate-200">{i + 1}. {s.title}</span>
+                              <span className={`text-[10px] px-2 py-0.5 rounded font-mono uppercase ${priorityColor}`}>{s.priority || 'medium'}</span>
+                            </div>
+                            {s.rationale && <p className="text-[11px] text-slate-400">{s.rationale}</p>}
+                            {s.action && <p className="text-[11px] text-emerald-400">👉 {s.action}</p>}
+                            {s.estimatedImpact && <p className="text-[10px] text-slate-500">Estimated impact: {s.estimatedImpact}</p>}
+                          </div>
+                        );
+                      })}
+                    </div>
+
+                    {strategyReport.cashflowNotes && (
+                      <div className="bg-slate-800 p-5 rounded-xl border border-slate-700">
+                        <h3 className="text-xs font-bold text-slate-300 uppercase tracking-wider mb-2">Cashflow Notes</h3>
+                        <p className="text-xs text-slate-400">{strategyReport.cashflowNotes}</p>
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  !strategyLoading && (
+                    <div className="no-print text-center text-slate-500 text-xs py-12 bg-slate-800 rounded-xl border border-slate-700">
+                      No report generated yet. Click "Generate Report" above once your accounts and expenses are up to date.
+                    </div>
+                  )
+                )}
+              </div>
+            )}
+
+            {/* PARSED / EDIT ACCOUNT MODAL */}
+            {pendingParsedData && (
+              <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4 z-50">
+                <div className="bg-slate-800 border border-slate-700 rounded-xl p-6 max-w-lg w-full space-y-4 shadow-2xl max-h-[90vh] overflow-y-auto">
+                  <div className="flex justify-between items-center border-b border-slate-700 pb-3">
+                    <h3 className="text-base font-bold text-slate-100 flex items-center gap-2">
+                      <i data-lucide="check-circle" className="w-5 h-5 text-emerald-400"></i> {pendingParsedData.existingAccountId ? 'Edit Account' : 'Verify Statement Extraction'}
+                    </h3>
+                    <button onClick={() => setPendingParsedData(null)} className="text-slate-400 hover:text-slate-200 text-xs">✕ Cancel</button>
+                  </div>
+
+                  {pendingParsedData.fileName && (
+                    <p className="text-xs text-slate-400">
+                      Extracted from file: <span className="text-slate-200 font-mono font-semibold">{pendingParsedData.fileName}</span>. Please review and adjust the fields before saving to your local vault.
+                      {pendingParsedData.documentType === 'other' && (
+                        <span className="block mt-1 text-amber-400">This doesn't look like an account statement — fields are unconfirmed, but the file will still be saved and attached below.</span>
+                      )}
+                    </p>
+                  )}
+
+                  {pendingParsedData.documentId && !pendingParsedData.fileName && (
+                    <div className="flex items-center justify-between bg-slate-900/50 rounded-lg px-3 py-2 text-xs">
+                      <span className="text-slate-400">Linked document on file</span>
+                      <button type="button" onClick={() => setViewingDocument(documents.find(d => d.id === pendingParsedData.documentId))} className="text-blue-400 hover:text-blue-300">View</button>
+                    </div>
+                  )}
+
+                  <form onSubmit={handleConfirmPendingParsedData} className="space-y-3 pt-2">
+                    <div>
+                      <label className="text-[11px] text-slate-400 block mb-1">Institution Name</label>
+                      <input
+                        type="text"
+                        value={pendingParsedData.institution}
+                        onChange={(e) => setPendingParsedData({ ...pendingParsedData, institution: e.target.value })}
+                        className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-100 focus:outline-none focus:border-emerald-500"
+                        required
+                      />
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-3">
+                      <div>
+                        <label className="text-[11px] text-slate-400 block mb-1">Account Type</label>
+                        <select
+                          value={pendingParsedData.accountType}
+                          onChange={(e) => setPendingParsedData({ ...pendingParsedData, accountType: e.target.value })}
+                          className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-100 focus:outline-none focus:border-emerald-500"
+                        >
+                          <option>Credit Card</option>
+                          <option>Checking</option>
+                          <option>Savings</option>
+                          <option>Mortgage</option>
+                          <option>Auto Loan</option>
+                          <option>Brokerage</option>
+                        </select>
+                      </div>
+                      <div>
+                        <label className="text-[11px] text-slate-400 block mb-1">Category</label>
+                        <select
+                          value={pendingParsedData.category}
+                          onChange={(e) => setPendingParsedData({ ...pendingParsedData, category: e.target.value })}
+                          className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-100 focus:outline-none focus:border-emerald-500"
+                        >
+                          <option value="Liability">Liability (-)</option>
+                          <option value="Asset">Asset (+)</option>
+                        </select>
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-3 gap-3">
+                      <div>
+                        <label className="text-[11px] text-slate-400 block mb-1">Acct Mask</label>
+                        <input
+                          type="text"
+                          value={pendingParsedData.accountNumberMasked}
+                          onChange={(e) => setPendingParsedData({ ...pendingParsedData, accountNumberMasked: e.target.value })}
+                          className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-100 focus:outline-none focus:border-emerald-500"
+                        />
+                      </div>
+                      <div>
+                        <label className="text-[11px] text-slate-400 block mb-1">Balance ($)</label>
+                        <input
+                          type="number"
+                          step="0.01"
+                          value={pendingParsedData.balance}
+                          onChange={(e) => setPendingParsedData({ ...pendingParsedData, balance: e.target.value })}
+                          className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs text-emerald-400 font-bold focus:outline-none focus:border-emerald-500"
+                          required
+                        />
+                      </div>
+                      <div>
+                        <label className="text-[11px] text-slate-400 block mb-1">APR (%)</label>
+                        <input
+                          type="number"
+                          step="0.1"
+                          value={pendingParsedData.interestRate}
+                          onChange={(e) => setPendingParsedData({ ...pendingParsedData, interestRate: e.target.value })}
+                          className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs text-rose-400 font-bold focus:outline-none focus:border-emerald-500"
+                        />
+                      </div>
+                    </div>
+
+                    <div>
+                      <label className="text-[11px] text-slate-400 block mb-1">Statement / Recorded-As-Of Date</label>
+                      <input
+                        type="date"
+                        value={pendingParsedData.statementDate || ''}
+                        onChange={(e) => setPendingParsedData({ ...pendingParsedData, statementDate: e.target.value })}
+                        className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-100 focus:outline-none focus:border-emerald-500"
+                      />
+                      <p className="text-[10px] text-slate-500 mt-1">This is treated as the "as-of" date for staleness tracking — not today's upload date.</p>
+                    </div>
+
+                    <div>
+                      <label className="text-[11px] text-slate-400 block mb-1">Account Notes (optional)</label>
+                      <textarea
+                        rows="2"
+                        value={pendingParsedData.notes || ''}
+                        onChange={(e) => setPendingParsedData({ ...pendingParsedData, notes: e.target.value })}
+                        placeholder="Where the login is, who to call, anything a successor should know about this account"
+                        className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-100 focus:outline-none focus:border-emerald-500"
+                      />
+                    </div>
+
+                    {pendingParsedData.recurringCharges && pendingParsedData.recurringCharges.length > 0 && (
+                      <div className="border border-slate-700 rounded-lg p-3 space-y-2 bg-slate-900/40">
+                        <h4 className="text-[11px] font-bold text-slate-300 uppercase tracking-wider flex items-center gap-1.5">
+                          <i data-lucide="repeat" className="w-3.5 h-3.5 text-blue-400"></i> Detected Recurring Charges
+                        </h4>
+                        <p className="text-[10px] text-slate-500">Found in this document but separate from the account balance above. Checked items get added to Budget &amp; Expenses.</p>
+                        <div className="space-y-1.5">
+                          {pendingParsedData.recurringCharges.map((rc, idx) => (
+                            <div key={rc.uid || idx} className="flex items-center gap-2 bg-slate-900 border border-slate-700 rounded-lg px-2 py-1.5">
+                              <input
+                                type="checkbox"
+                                checked={rc.include}
+                                onChange={(e) => {
+                                  const updated = [...pendingParsedData.recurringCharges];
+                                  updated[idx] = { ...updated[idx], include: e.target.checked };
+                                  setPendingParsedData({ ...pendingParsedData, recurringCharges: updated });
+                                }}
+                                className="rounded bg-slate-900 border-slate-700 text-emerald-500"
+                              />
+                              <input
+                                type="text"
+                                value={rc.name}
+                                onChange={(e) => {
+                                  const updated = [...pendingParsedData.recurringCharges];
+                                  updated[idx] = { ...updated[idx], name: e.target.value };
+                                  setPendingParsedData({ ...pendingParsedData, recurringCharges: updated });
+                                }}
+                                className="flex-1 min-w-0 bg-transparent text-[11px] text-slate-200 focus:outline-none"
+                              />
+                              <select
+                                value={rc.category}
+                                onChange={(e) => {
+                                  const updated = [...pendingParsedData.recurringCharges];
+                                  updated[idx] = { ...updated[idx], category: e.target.value };
+                                  setPendingParsedData({ ...pendingParsedData, recurringCharges: updated });
+                                }}
+                                className="bg-slate-800 border border-slate-700 rounded px-1 py-0.5 text-[10px] text-slate-300"
+                              >
+                                {CATEGORIES.map(c => <option key={c}>{c}</option>)}
+                              </select>
+                              <input
+                                type="number"
+                                step="0.01"
+                                value={rc.amount}
+                                onChange={(e) => {
+                                  const updated = [...pendingParsedData.recurringCharges];
+                                  updated[idx] = { ...updated[idx], amount: e.target.value };
+                                  setPendingParsedData({ ...pendingParsedData, recurringCharges: updated });
+                                }}
+                                className="w-20 bg-slate-800 border border-slate-700 rounded px-1 py-0.5 text-[10px] text-amber-400 font-bold"
+                              />
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    <div className="flex justify-end gap-2 pt-3">
+                      <button
+                        type="button"
+                        onClick={() => setPendingParsedData(null)}
+                        className="px-4 py-2 rounded-lg text-xs bg-slate-700 hover:bg-slate-600 text-slate-200"
+                      >
+                        Discard
+                      </button>
+                      <button
+                        type="submit"
+                        className="px-4 py-2 rounded-lg text-xs bg-emerald-600 hover:bg-emerald-500 text-white font-medium shadow-md"
+                      >
+                        {pendingParsedData.existingAccountId ? 'Save Changes' : 'Confirm & Save to Vault'}
+                      </button>
+                    </div>
+                  </form>
+                </div>
+              </div>
+            )}
+
+            {/* DOCUMENT VIEWER MODAL */}
+            {viewingDocument && (
+              <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4 z-50">
+                <div className="bg-slate-800 border border-slate-700 rounded-xl p-5 max-w-3xl w-full space-y-3 shadow-2xl max-h-[90vh] flex flex-col">
+                  <div className="flex justify-between items-center border-b border-slate-700 pb-3">
+                    <h3 className="text-sm font-bold text-slate-100 font-mono">{viewingDocument.fileName}</h3>
+                    <div className="flex items-center gap-3">
+                      <a href={viewingDocument.dataUrl} download={viewingDocument.fileName} className="text-emerald-400 hover:text-emerald-300 text-xs flex items-center gap-1">
+                        <i data-lucide="download" className="w-4 h-4"></i> Download
+                      </a>
+                      <button onClick={() => setViewingDocument(null)} className="text-slate-400 hover:text-slate-200 text-xs">✕ Close</button>
+                    </div>
+                  </div>
+                  <div className="flex-1 overflow-auto bg-slate-950 rounded-lg flex items-center justify-center min-h-[50vh]">
+                    {viewingDocument.mimeType === 'application/pdf' ? (
+                      <iframe src={viewingDocument.dataUrl} title={viewingDocument.fileName} className="w-full h-[70vh] rounded-lg" />
+                    ) : viewingDocument.mimeType && viewingDocument.mimeType.startsWith('image/') ? (
+                      <img src={viewingDocument.dataUrl} alt={viewingDocument.fileName} className="max-w-full max-h-[70vh] object-contain" />
+                    ) : (
+                      <p className="text-xs text-slate-400 p-6">Preview not available for this file type — use Download to open it.</p>
+                    )}
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* SETTINGS MODAL */}
+            {isSettingsOpen && (
+              <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4 z-50">
+                <div className="bg-slate-800 border border-slate-700 rounded-xl p-6 max-w-md w-full space-y-5 shadow-2xl max-h-[90vh] overflow-y-auto">
+                  <div className="flex justify-between items-center border-b border-slate-700 pb-3">
+                    <h3 className="text-base font-bold text-slate-100 flex items-center gap-2">
+                      <i data-lucide="settings" className="w-5 h-5 text-emerald-400"></i> Vault Settings & Integrations
+                    </h3>
+                    <button onClick={() => setIsSettingsOpen(false)} className="text-slate-400 hover:text-slate-200 text-xs">✕ Close</button>
+                  </div>
+
+                  <div className="space-y-4">
+
+                    {/* GROQ API KEY */}
+                    <div className="p-4 bg-slate-900/60 rounded-lg border border-slate-700 space-y-2">
+                      <h4 className="text-xs font-bold text-slate-200 uppercase tracking-wider flex items-center gap-2">
+                        <i data-lucide="sparkles" className="w-4 h-4 text-purple-400"></i> Groq API Key (Optional)
+                      </h4>
+                      <p className="text-[11px] text-slate-400">
+                        Used for AI-assisted statement reading and classification. Leave blank for 100% offline rule-based parsing.
+                      </p>
+                      <input
+                        type="password"
+                        placeholder="gsk_..."
+                        value={groqApiKey}
+                        onChange={(e) => handleSaveApiKey(e.target.value)}
+                        className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-100 focus:outline-none focus:border-purple-500 font-mono"
+                      />
+                      <div className="grid grid-cols-1 gap-2 pt-1">
+                        <button
+                          type="button"
+                          onClick={handleFetchModels}
+                          disabled={modelsFetching}
+                          className="w-full bg-slate-700 hover:bg-slate-600 disabled:opacity-50 text-slate-100 py-1.5 rounded-lg text-[11px] font-medium transition flex items-center justify-center gap-1.5"
+                        >
+                          <i data-lucide={modelsFetching ? 'loader' : 'refresh-cw'} className="w-3.5 h-3.5"></i>
+                          {modelsFetching ? 'Checking your Groq account...' : 'Fetch Models Available To My Key'}
+                        </button>
+                        {modelsFetchError && <p className="text-[10px] text-rose-400">{modelsFetchError}</p>}
+                        {availableModels.length > 0 && (
+                          <p className="text-[10px] text-emerald-400">{availableModels.length} models found — pick one below (autocomplete) or type your own.</p>
+                        )}
+                        <datalist id="groq-model-options">
+                          {availableModels.map(m => <option key={m} value={m} />)}
+                        </datalist>
+                        <div>
+                          <label className="text-[10px] text-slate-500 block mb-1">Text model (PDF/CSV parsing, wealth strategy)</label>
+                          <input type="text" list="groq-model-options" value={textModel} onChange={(e) => handleSaveTextModel(e.target.value)} className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-1.5 text-[11px] text-slate-300 font-mono" />
+                        </div>
+                        <div>
+                          <label className="text-[10px] text-slate-500 block mb-1">Vision model (photo/image parsing)</label>
+                          <input type="text" list="groq-model-options" value={visionModel} onChange={(e) => handleSaveVisionModel(e.target.value)} className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-1.5 text-[11px] text-slate-300 font-mono" />
+                          {availableModels.some(isLikelyVisionModel) && (
+                            <div className="flex flex-wrap gap-1.5 mt-1.5">
+                              {availableModels.filter(isLikelyVisionModel).map(m => (
+                                <button
+                                  type="button"
+                                  key={m}
+                                  onClick={() => handleSaveVisionModel(m)}
+                                  className={`text-[10px] px-2 py-0.5 rounded font-mono border ${visionModel === m ? 'bg-purple-500/20 border-purple-500 text-purple-300' : 'bg-slate-900 border-slate-700 text-slate-400 hover:border-purple-500'}`}
+                                >
+                                  {m}
+                                </button>
+                              ))}
+                            </div>
+                          )}
+                          {availableModels.length > 0 && !availableModels.some(isLikelyVisionModel) && (
+                            <p className="text-[10px] text-amber-400 mt-1">None of your fetched models look vision-capable by name — image parsing may not work on this account. PDF/CSV parsing is unaffected.</p>
+                          )}
+                        </div>
+                        <p className="text-[10px] text-slate-500">Groq's lineup and per-account access changes often — if a model returns a "does not exist / no access" error, fetch the list above and pick a live one.</p>
+                      </div>
+                    </div>
+
+                    {/* STALENESS THRESHOLD */}
+                    <div className="p-4 bg-slate-900/60 rounded-lg border border-slate-700 space-y-2">
+                      <h4 className="text-xs font-bold text-slate-200 uppercase tracking-wider flex items-center gap-2">
+                        <i data-lucide="clock" className="w-4 h-4 text-amber-400"></i> Statement Staleness Threshold
+                      </h4>
+                      <p className="text-[11px] text-slate-400">Flag an account when its statement is older than:</p>
+                      <select value={staleDays} onChange={(e) => handleSaveStaleDays(e.target.value)} className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-100">
+                        <option value="30">30 days</option>
+                        <option value="35">35 days</option>
+                        <option value="45">45 days</option>
+                        <option value="60">60 days</option>
+                        <option value="90">90 days</option>
+                      </select>
+                    </div>
+
+                    {/* EXPORT BACKUP */}
+                    <div className="p-4 bg-slate-900/60 rounded-lg border border-slate-700 space-y-2">
+                      <h4 className="text-xs font-bold text-slate-200 uppercase tracking-wider flex items-center gap-2">
+                        <i data-lucide="download-cloud" className="w-4 h-4 text-emerald-400"></i> Export Complete Backup
+                      </h4>
+                      <p className="text-[11px] text-slate-400">
+                        Generates a structured `.json` snapshot of all accounts, documents, balances, contacts, budget expenses, net worth history, and executor instructions.
+                      </p>
+                      <button
+                        onClick={exportJsonBackup}
+                        className="w-full bg-emerald-600 hover:bg-emerald-500 text-white py-2 rounded-lg text-xs font-medium transition flex items-center justify-center gap-2"
+                      >
+                        Download JSON Backup File
+                      </button>
+                    </div>
+
+                    {/* RESTORE BACKUP */}
+                    <div className="p-4 bg-slate-900/60 rounded-lg border border-slate-700 space-y-2">
+                      <h4 className="text-xs font-bold text-slate-200 uppercase tracking-wider flex items-center gap-2">
+                        <i data-lucide="upload-cloud" className="w-4 h-4 text-blue-400"></i> Restore Vault Backup
+                      </h4>
+                      <p className="text-[11px] text-slate-400">
+                        Upload a previously saved `.json` vault backup file to restore your database on this machine.
+                      </p>
+                      <label className="w-full bg-slate-700 hover:bg-slate-600 text-slate-100 py-2 rounded-lg text-xs font-medium transition flex items-center justify-center gap-2 cursor-pointer">
+                        <input type="file" accept=".json" onChange={handleRestoreBackup} className="hidden" />
+                        Select Backup File (.json)
+                      </label>
+                    </div>
+
+                    {/* DANGER ZONE / PURGE */}
+                    <div className="p-4 bg-rose-950/30 rounded-lg border border-rose-900/50 space-y-2">
+                      <h4 className="text-xs font-bold text-rose-400 uppercase tracking-wider flex items-center gap-2">
+                        <i data-lucide="alert-octagon" className="w-4 h-4"></i> Danger Zone
+                      </h4>
+                      <p className="text-[11px] text-slate-400">
+                        Wipe all accounts, documents, contacts, debt entries, and expenses stored in this browser's local IndexedDB.
+                      </p>
+                      <button
+                        onClick={handlePurgeDatabase}
+                        className="w-full bg-rose-900/60 hover:bg-rose-800 text-rose-200 py-2 rounded-lg text-xs font-medium transition"
+                      >
+                        Purge Local Database
+                      </button>
+                    </div>
+
+                  </div>
+                </div>
+              </div>
+            )}
+
+          </div>
+        </div>
+      );
+    }
+
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<App />);
+  </script>
+
+  <!-- Service worker registration (plain script, runs independent of the React/Babel bundle above) -->
+  <script>
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load', () => {
+        navigator.serviceWorker.register('sw.js').catch((err) => {
+          console.warn('Service worker registration failed:', err);
+        });
+      });
+    }
+  </script>
+</body>
+</html>
