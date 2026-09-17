@@ -252,7 +252,9 @@ Return ONLY a raw JSON object (no markdown fences, no commentary) with these exa
   "statementDate": "YYYY-MM-DD" or "",
   "dueDay": number or null,
   "confidence": "high" | "medium" | "low",
-  "recurringCharges": [ { "name": string, "amount": number, "category": one of [${CATEGORIES.join(', ')}], "dueDay": number or null } ]
+  "recurringCharges": [ { "name": string, "amount": number, "category": one of [${CATEGORIES.join(', ')}], "dueDay": number or null } ],
+  "linkedAssetLabel": string or "",
+  "linkedAssetValue": number or null
 }
 
 Rules:
@@ -261,6 +263,7 @@ Rules:
 - "statementDate" is the statement closing date / "as of" date / statement period end date printed on the document, in YYYY-MM-DD format. Leave "" if not found — do not guess today's date.
 - "dueDay" is the day-of-month (1-31) this account's own payment/bill is due, if a due date is printed. Otherwise null.
 - "recurringCharges" lists other fixed/recurring monthly obligations you can clearly identify inside this document — e.g. a subscription charge, a recurring auto-draft utility payment, an insurance premium, or a separate loan/mortgage payment line — that are distinct from this account's own balance. Do NOT list one-off purchases, individual retail transactions, or this account's own balance/payment as a recurring charge. Pick the closest matching category from the list given. Return an empty array if none are clearly recurring.
+- "linkedAssetLabel" and "linkedAssetValue" only apply to secured debt (Mortgage, Auto Loan, or similar collateral-backed liability). If — and ONLY if — the document explicitly prints a current estimated/appraised/assessed market value of the collateral (e.g. "Estimated Market Value", "Assessed Value"), set "linkedAssetLabel" to a short label like "Home Value" or "Vehicle Value" and "linkedAssetValue" to that number. Do NOT use the original loan amount, original purchase price, or original appraisal at origination — those are not current value. If no explicit current value is printed, leave "linkedAssetLabel" as "" and "linkedAssetValue" as null; do not guess or estimate a market value yourself.
 - Assets (checking, savings, brokerage) are positive balances; liabilities (credit card, loan, mortgage) should have category "Liability".
 - Output must be valid JSON and nothing else.`;
 
@@ -351,7 +354,9 @@ Rules:
         statementDate,
         dueDay,
         confidence: 'low',
-        recurringCharges: []
+        recurringCharges: [],
+        linkedAssetLabel: '',
+        linkedAssetValue: null
       };
     };
 
@@ -442,7 +447,9 @@ Rules:
         category: 'Asset',
         accountNumberMasked: '',
         balance: '',
-        interestRate: '0'
+        interestRate: '0',
+        linkedAssetLabel: '',
+        linkedAssetValue: ''
       });
 
       const [expForm, setExpForm] = useState({
@@ -529,7 +536,8 @@ Rules:
       };
 
       const takeNetWorthSnapshot = async (recData) => {
-        const totalAssets = recData.filter(r => r.category === 'Asset').reduce((a, r) => a + r.balance, 0);
+        const totalAssets = recData.filter(r => r.category === 'Asset').reduce((a, r) => a + r.balance, 0)
+          + recData.reduce((a, r) => a + (parseFloat(r.linkedAssetValue) || 0), 0);
         const totalLiabilities = recData.filter(r => r.category !== 'Asset').reduce((a, r) => a + r.balance, 0);
         const today = isoToday();
         try {
@@ -567,11 +575,13 @@ Rules:
           statementDate: '',
           notes: '',
           documentId: null,
+          linkedAssetLabel: form.category === 'Liability' ? (form.linkedAssetLabel || '') : '',
+          linkedAssetValue: form.category === 'Liability' ? (parseFloat(form.linkedAssetValue) || 0) : 0,
           updatedAt: new Date().toISOString()
         };
 
         await saveDBItem(STORES.ACCOUNTS, newRecord);
-        setForm({ institution: '', accountType: 'Checking', category: 'Asset', accountNumberMasked: '', balance: '', interestRate: '0' });
+        setForm({ institution: '', accountType: 'Checking', category: 'Asset', accountNumberMasked: '', balance: '', interestRate: '0', linkedAssetLabel: '', linkedAssetValue: '' });
         loadAllData();
       };
 
@@ -613,7 +623,9 @@ Rules:
           interestRate: rec.interestRate,
           statementDate: rec.statementDate || '',
           notes: rec.notes || '',
-          recurringCharges: []
+          recurringCharges: [],
+          linkedAssetLabel: rec.linkedAssetLabel || '',
+          linkedAssetValue: rec.linkedAssetValue || ''
         });
       };
 
@@ -633,6 +645,8 @@ Rules:
           statementDate: pendingParsedData.statementDate || '',
           notes: pendingParsedData.notes || '',
           documentId: pendingParsedData.documentId || null,
+          linkedAssetLabel: pendingParsedData.category === 'Liability' ? (pendingParsedData.linkedAssetLabel || '') : '',
+          linkedAssetValue: pendingParsedData.category === 'Liability' ? (parseFloat(pendingParsedData.linkedAssetValue) || 0) : 0,
           updatedAt: new Date().toISOString()
         };
 
@@ -898,7 +912,9 @@ Rules:
                   interestRate: 19.99,
                   statementDate: latestDate,
                   notes: existingAccountId ? (records.find(r => r.id === existingAccountId) || {}).notes || '' : '',
-                  recurringCharges: []
+                  recurringCharges: [],
+                  linkedAssetLabel: existingAccountId ? (records.find(r => r.id === existingAccountId) || {}).linkedAssetLabel || '' : '',
+                  linkedAssetValue: existingAccountId ? (records.find(r => r.id === existingAccountId) || {}).linkedAssetValue || '' : ''
                 });
                 setParsing(false);
               }
@@ -941,7 +957,9 @@ Rules:
               statementDate: extracted.statementDate || '',
               dueDay: extracted.dueDay || null,
               notes: existingAccountId ? (records.find(r => r.id === existingAccountId) || {}).notes || '' : '',
-              recurringCharges: normalizeRecurringCharges(extracted.recurringCharges)
+              recurringCharges: normalizeRecurringCharges(extracted.recurringCharges),
+              linkedAssetLabel: extracted.linkedAssetLabel || (existingAccountId ? (records.find(r => r.id === existingAccountId) || {}).linkedAssetLabel || '' : ''),
+              linkedAssetValue: extracted.linkedAssetValue || (existingAccountId ? (records.find(r => r.id === existingAccountId) || {}).linkedAssetValue || '' : '')
             });
             setParsing(false);
           } else if (isImage) {
@@ -985,7 +1003,9 @@ Rules:
               interestRate: extracted.interestRate || 0,
               statementDate: extracted.statementDate || '',
               notes: existingAccountId ? (records.find(r => r.id === existingAccountId) || {}).notes || '' : '',
-              recurringCharges: normalizeRecurringCharges(extracted.recurringCharges)
+              recurringCharges: normalizeRecurringCharges(extracted.recurringCharges),
+              linkedAssetLabel: extracted.linkedAssetLabel || (existingAccountId ? (records.find(r => r.id === existingAccountId) || {}).linkedAssetLabel || '' : ''),
+              linkedAssetValue: extracted.linkedAssetValue || (existingAccountId ? (records.find(r => r.id === existingAccountId) || {}).linkedAssetValue || '' : '')
             });
             setParsing(false);
           } else {
@@ -1012,9 +1032,11 @@ Rules:
       };
 
       // ---------------- DERIVED DATA ----------------
-      const totalAssets = records.filter(r => r.category === 'Asset').reduce((acc, r) => acc + r.balance, 0);
+      const totalAssets = records.filter(r => r.category === 'Asset').reduce((acc, r) => acc + r.balance, 0)
+        + records.reduce((acc, r) => acc + (parseFloat(r.linkedAssetValue) || 0), 0);
       const totalLiabilities = records.filter(r => r.category !== 'Asset').reduce((acc, r) => acc + r.balance, 0);
       const netWorth = totalAssets - totalLiabilities;
+      const linkedAssetTotal = records.reduce((acc, r) => acc + (parseFloat(r.linkedAssetValue) || 0), 0);
       const totalFixedExpenses = expenses.reduce((acc, e) => acc + e.amount, 0);
       const monthlyNetCashflow = monthlyIncome - totalFixedExpenses;
 
@@ -1121,6 +1143,17 @@ Rules:
           else totalLiabilitiesPdf += rec.balance;
 
           y += 6;
+
+          const linkedVal = parseFloat(rec.linkedAssetValue) || 0;
+          if (linkedVal > 0) {
+            if (y > 270) { doc.addPage(); y = 20; }
+            const equity = linkedVal - rec.balance;
+            doc.setFontSize(7);
+            doc.text(`   ↳ ${rec.linkedAssetLabel || 'Asset Value'}: $${linkedVal.toLocaleString('en-US', { minimumFractionDigits: 2 })}  |  Equity: $${equity.toLocaleString('en-US', { minimumFractionDigits: 2 })}`, 14, y);
+            doc.setFontSize(8);
+            totalAssetsPdf += linkedVal;
+            y += 5;
+          }
         });
 
         const accountsWithNotes = records.filter(r => r.notes && r.notes.trim());
@@ -1193,7 +1226,10 @@ Rules:
               category: r.category,
               balance: r.balance,
               interestRate: r.interestRate,
-              statementAgeDays: getStaleness(r.statementDate, staleDays).age
+              statementAgeDays: getStaleness(r.statementDate, staleDays).age,
+              linkedAssetLabel: r.linkedAssetLabel || undefined,
+              linkedAssetValue: parseFloat(r.linkedAssetValue) || undefined,
+              equity: parseFloat(r.linkedAssetValue) > 0 ? (parseFloat(r.linkedAssetValue) - r.balance) : undefined
             })),
             monthlyExpensesByCategory: CATEGORIES.map(c => ({
               category: c,
@@ -1449,6 +1485,9 @@ Rules:
                 <div className="text-xl font-bold text-emerald-400 mt-1">
                   ${totalAssets.toLocaleString('en-US', { minimumFractionDigits: 2 })}
                 </div>
+                {linkedAssetTotal > 0 && (
+                  <div className="text-[10px] text-slate-500 mt-0.5">incl. ${linkedAssetTotal.toLocaleString('en-US', { minimumFractionDigits: 0 })} secured-asset value</div>
+                )}
               </div>
               <div className="bg-slate-800 p-4 rounded-xl border border-slate-700">
                 <span className="text-[10px] uppercase text-slate-400 font-semibold tracking-wider">Total Liabilities</span>
@@ -1547,6 +1586,16 @@ Rules:
                       <input type="number" step="0.1" placeholder="APR / Interest %" value={form.interestRate} onChange={(e) => setForm({ ...form, interestRate: e.target.value })} className="col-span-1 bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-100" />
                     </div>
 
+                    {form.category === 'Liability' && (
+                      <div className="border border-slate-700 rounded-lg p-2.5 space-y-2 bg-slate-900/40">
+                        <p className="text-[10px] text-slate-500">Secured by something you own (home, car)? Track its value so equity counts toward net worth.</p>
+                        <div className="grid grid-cols-2 gap-2">
+                          <input type="text" placeholder={form.accountType === 'Mortgage' ? 'Home Value' : form.accountType === 'Auto Loan' ? 'Vehicle Value' : 'Asset Label'} value={form.linkedAssetLabel} onChange={(e) => setForm({ ...form, linkedAssetLabel: e.target.value })} className="bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-100" />
+                          <input type="number" step="0.01" placeholder="Est. Value ($)" value={form.linkedAssetValue} onChange={(e) => setForm({ ...form, linkedAssetValue: e.target.value })} className="bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs text-emerald-400 font-bold" />
+                        </div>
+                      </div>
+                    )}
+
                     <button type="submit" className="w-full bg-slate-700 hover:bg-slate-600 text-slate-100 font-medium py-2 rounded-lg text-xs transition">Save Account to Vault</button>
                   </form>
                 </div>
@@ -1567,6 +1616,7 @@ Rules:
                           <tbody className="divide-y divide-slate-700/50">
                             {records.map((rec) => {
                               const linkedDoc = getDocumentForAccount(rec.id);
+                              const linkedVal = parseFloat(rec.linkedAssetValue) || 0;
                               return (
                                 <tr key={rec.id} className="hover:bg-slate-700/30">
                                   <td className="py-2.5 font-medium text-slate-200">{rec.institution}</td>
@@ -1574,6 +1624,11 @@ Rules:
                                   <td className="py-2.5 text-slate-400">{rec.interestRate}%</td>
                                   <td className={`py-2.5 font-bold ${rec.category === 'Asset' ? 'text-emerald-400' : 'text-rose-400'}`}>
                                     ${rec.balance.toLocaleString('en-US', { minimumFractionDigits: 2 })}
+                                    {linkedVal > 0 && (
+                                      <div className="text-[10px] font-normal text-slate-400">
+                                        {rec.linkedAssetLabel || 'Asset Value'}: ${linkedVal.toLocaleString('en-US', { minimumFractionDigits: 0 })} · Equity: <span className={(linkedVal - rec.balance) >= 0 ? 'text-emerald-400' : 'text-rose-400'}>${(linkedVal - rec.balance).toLocaleString('en-US', { minimumFractionDigits: 0 })}</span>
+                                      </div>
+                                    )}
                                   </td>
                                   <td className="py-2.5"><StaleBadge statementDate={rec.statementDate} /></td>
                                   <td className="py-2.5 text-right whitespace-nowrap">
@@ -2109,6 +2164,51 @@ Rules:
                       />
                       <p className="text-[10px] text-slate-500 mt-1">This is treated as the "as-of" date for staleness tracking — not today's upload date.</p>
                     </div>
+
+                    {pendingParsedData.category === 'Liability' && (
+                      <div className="border border-slate-700 rounded-lg p-3 space-y-2 bg-slate-900/40">
+                        <h4 className="text-[11px] font-bold text-slate-300 uppercase tracking-wider flex items-center gap-1.5">
+                          <i data-lucide="home" className="w-3.5 h-3.5 text-emerald-400"></i> Secured By An Asset? (optional)
+                        </h4>
+                        <p className="text-[10px] text-slate-500">
+                          For a mortgage, auto loan, or any debt backed by something you own — track the asset's current value so your net worth reflects the equity, not just the debt.
+                        </p>
+                        <div className="grid grid-cols-2 gap-2">
+                          <div>
+                            <label className="text-[10px] text-slate-500 block mb-1">Asset Label</label>
+                            <input
+                              type="text"
+                              placeholder={pendingParsedData.accountType === 'Mortgage' ? 'Home Value' : pendingParsedData.accountType === 'Auto Loan' ? 'Vehicle Value' : 'Asset Value'}
+                              value={pendingParsedData.linkedAssetLabel || ''}
+                              onChange={(e) => setPendingParsedData({ ...pendingParsedData, linkedAssetLabel: e.target.value })}
+                              className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-100 focus:outline-none focus:border-emerald-500"
+                            />
+                          </div>
+                          <div>
+                            <label className="text-[10px] text-slate-500 block mb-1">Estimated Current Value ($)</label>
+                            <input
+                              type="number"
+                              step="0.01"
+                              placeholder="0.00"
+                              value={pendingParsedData.linkedAssetValue || ''}
+                              onChange={(e) => setPendingParsedData({ ...pendingParsedData, linkedAssetValue: e.target.value })}
+                              className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs text-emerald-400 font-bold focus:outline-none focus:border-emerald-500"
+                            />
+                          </div>
+                        </div>
+                        {parseFloat(pendingParsedData.linkedAssetValue) > 0 && (
+                          <p className="text-[11px] text-slate-300">
+                            Equity: <span className={((parseFloat(pendingParsedData.linkedAssetValue) || 0) - (parseFloat(pendingParsedData.balance) || 0)) >= 0 ? 'text-emerald-400 font-bold' : 'text-rose-400 font-bold'}>
+                              ${((parseFloat(pendingParsedData.linkedAssetValue) || 0) - (parseFloat(pendingParsedData.balance) || 0)).toLocaleString('en-US', { minimumFractionDigits: 2 })}
+                            </span>
+                            <span className="text-slate-500"> (value minus this balance) — counted toward your total assets.</span>
+                          </p>
+                        )}
+                        <p className="text-[10px] text-slate-600">
+                          No automatic home/vehicle valuation is available (that needs a paid real-estate/auto-value API this offline app doesn't use) — enter your best estimate and update it periodically. If a statement explicitly prints a current appraised/assessed value, it's pre-filled above; otherwise this stays blank until you set it.
+                        </p>
+                      </div>
+                    )}
 
                     <div>
                       <label className="text-[11px] text-slate-400 block mb-1">Account Notes (optional)</label>
