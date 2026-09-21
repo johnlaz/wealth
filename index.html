@@ -41,6 +41,12 @@
   <script src="https://unpkg.com/lucide@latest"></script>
 
   <style>
+    @keyframes toast-slide-in {
+      from { opacity: 0; transform: translateY(8px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+    .toast-item { animation: toast-slide-in 0.2s ease-out; }
+
     @media print {
       .no-print { display: none !important; }
       body { background: #fff !important; }
@@ -458,6 +464,36 @@ Rules:
       const [confirmPinValue, setConfirmPinValue] = useState('');
       const [pinSetupError, setPinSetupError] = useState('');
 
+      // Toasts (replaces alert()) and a themed confirm dialog (replaces confirm())
+      const [toasts, setToasts] = useState([]);
+      const toastIdRef = useRef(0);
+      const backupToastShownRef = useRef(false);
+
+      const showToast = (type, message, duration = 4500) => {
+        const id = ++toastIdRef.current;
+        setToasts(prev => [...prev, { id, type, message }]);
+        setTimeout(() => {
+          setToasts(prev => prev.filter(t => t.id !== id));
+        }, duration);
+      };
+
+      const dismissToast = (id) => {
+        setToasts(prev => prev.filter(t => t.id !== id));
+      };
+
+      const [confirmModal, setConfirmModal] = useState(null);
+
+      const requestConfirm = ({ title, message, confirmLabel = 'Confirm', danger = false, onConfirm }) => {
+        setConfirmModal({ title, message, confirmLabel, danger, onConfirm });
+      };
+
+      const handleConfirmModalConfirm = () => {
+        if (confirmModal && confirmModal.onConfirm) confirmModal.onConfirm();
+        setConfirmModal(null);
+      };
+
+      const handleConfirmModalCancel = () => setConfirmModal(null);
+
       const [strategyReport, setStrategyReport] = useState(null);
       const [strategyLoading, setStrategyLoading] = useState(false);
       const [strategyError, setStrategyError] = useState('');
@@ -547,6 +583,7 @@ Rules:
         const handleAppInstalled = () => {
           setIsAppInstalled(true);
           setInstallPromptEvent(null);
+          showToast('success', 'Installed! Open Financial Vault from your home screen anytime.');
         };
         window.addEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
         window.addEventListener('appinstalled', handleAppInstalled);
@@ -554,6 +591,37 @@ Rules:
           window.removeEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
           window.removeEventListener('appinstalled', handleAppInstalled);
         };
+      }, []);
+
+      // Online/offline status — relevant since this app is built to keep working with no connection
+      useEffect(() => {
+        const handleOnline = () => showToast('success', 'Back online.');
+        const handleOffline = () => showToast('warning', "You're offline — the app keeps working from data already on this device.");
+        window.addEventListener('online', handleOnline);
+        window.addEventListener('offline', handleOffline);
+        return () => {
+          window.removeEventListener('online', handleOnline);
+          window.removeEventListener('offline', handleOffline);
+        };
+      }, []);
+
+      // Nudge once per session if the JSON backup is stale or has never been taken — after unlock, not on the lock screen
+      useEffect(() => {
+        if (isLocked) return;
+        if (backupToastShownRef.current) return;
+        backupToastShownRef.current = true;
+        const ageDays = lastBackupAt ? daysBetween(lastBackupAt.slice(0, 10)) : null;
+        if (ageDays === null) {
+          showToast('warning', "You haven't exported a backup yet — do it from Settings so your vault isn't only on this device.");
+        } else if (ageDays > BACKUP_STALE_DAYS) {
+          showToast('warning', `Your last backup was ${ageDays} days ago — consider exporting a fresh one from Settings.`);
+        }
+      }, [isLocked]);
+
+      // Bridge so the plain <script> service-worker registration (outside React) can surface a themed toast
+      useEffect(() => {
+        window.__vaultShowToast = (type, message) => showToast(type, message);
+        return () => { delete window.__vaultShowToast; };
       }, []);
 
       const handleInstallClick = async () => {
@@ -565,7 +633,7 @@ Rules:
 
       useEffect(() => {
         if (window.lucide) window.lucide.createIcons();
-      }, [records, expenses, documents, contacts, activeTab, parsing, pendingParsedData, isSettingsOpen, viewingDocument, expenseCategoryFilter, expenseSearchQuery, strategyReport, strategyLoading, installPromptEvent, isLocked, pinError, pinLockEnabled, showPinSetup]);
+      }, [records, expenses, documents, contacts, activeTab, parsing, pendingParsedData, isSettingsOpen, viewingDocument, expenseCategoryFilter, expenseSearchQuery, strategyReport, strategyLoading, installPromptEvent, isLocked, pinError, pinLockEnabled, showPinSetup, toasts, confirmModal]);
 
       const loadAllData = async () => {
         try {
@@ -756,12 +824,22 @@ Rules:
         loadAllData();
       };
 
-      const handleDeleteRecord = async (id) => {
-        if (!confirm('Delete this account and its linked document(s) from the vault?')) return;
+      const performDeleteRecord = async (id) => {
         const linkedDocs = documents.filter(d => d.accountId === id);
         for (const d of linkedDocs) await deleteDBItem(STORES.DOCUMENTS, d.id);
         await deleteDBItem(STORES.ACCOUNTS, id);
         loadAllData();
+        showToast('info', 'Account deleted.');
+      };
+
+      const handleDeleteRecord = (id) => {
+        requestConfirm({
+          title: 'Delete Account',
+          message: 'Delete this account and its linked document(s) from the vault? This cannot be undone.',
+          confirmLabel: 'Delete',
+          danger: true,
+          onConfirm: () => performDeleteRecord(id)
+        });
       };
 
       const handleDeleteExpense = async (id) => {
@@ -834,8 +912,7 @@ Rules:
         setConfirmPinValue('');
       };
 
-      const handleDisablePinLock = () => {
-        if (!confirm('Disable PIN lock? Anyone who opens this app on this device will see your vault without entering a PIN.')) return;
+      const performDisablePinLock = () => {
         localStorage.removeItem('pin_lock_enabled');
         localStorage.removeItem('pin_hash');
         setPinLockEnabled(false);
@@ -844,6 +921,17 @@ Rules:
         setNewPinValue('');
         setConfirmPinValue('');
         setPinSetupError('');
+        showToast('info', 'PIN lock disabled.');
+      };
+
+      const handleDisablePinLock = () => {
+        requestConfirm({
+          title: 'Disable PIN Lock',
+          message: 'Anyone who opens this app on this device will see your vault without entering a PIN. Disable anyway?',
+          confirmLabel: 'Disable',
+          danger: true,
+          onConfirm: performDisablePinLock
+        });
       };
 
       const handleUnlockSubmit = async (e) => {
@@ -924,6 +1012,7 @@ Rules:
         const nowIso = new Date().toISOString();
         try { localStorage.setItem('last_backup_at', nowIso); } catch (e) { /* storage unavailable */ }
         setLastBackupAt(nowIso);
+        showToast('success', 'Backup downloaded — saved to your device.');
       };
 
       const handleRestoreBackup = (e) => {
@@ -963,30 +1052,39 @@ Rules:
               localStorage.setItem('executor_notes', data.notes);
             }
             await loadAllData();
-            alert('Vault restored successfully!');
+            showToast('success', 'Vault restored successfully!');
             setIsSettingsOpen(false);
           } catch (err) {
             console.error('Failed to restore backup:', err);
-            alert('Invalid backup JSON file.');
+            showToast('error', 'Invalid backup JSON file.');
           }
         };
         reader.readAsText(file);
       };
 
-      const handlePurgeDatabase = async () => {
-        if (confirm('Are you sure you want to completely erase all accounts, documents, contacts, and expenses from this device?')) {
-          await clearStore(STORES.ACCOUNTS);
-          await clearStore(STORES.EXPENSES);
-          await clearStore(STORES.DOCUMENTS);
-          await clearStore(STORES.CONTACTS);
-          await clearStore(STORES.NETWORTH_HISTORY);
-          localStorage.removeItem('executor_notes');
-          localStorage.removeItem('monthly_income');
-          setNotes('');
-          setMonthlyIncome(10000);
-          await loadAllData();
-          setIsSettingsOpen(false);
-        }
+      const performPurgeDatabase = async () => {
+        await clearStore(STORES.ACCOUNTS);
+        await clearStore(STORES.EXPENSES);
+        await clearStore(STORES.DOCUMENTS);
+        await clearStore(STORES.CONTACTS);
+        await clearStore(STORES.NETWORTH_HISTORY);
+        localStorage.removeItem('executor_notes');
+        localStorage.removeItem('monthly_income');
+        setNotes('');
+        setMonthlyIncome(10000);
+        await loadAllData();
+        setIsSettingsOpen(false);
+        showToast('info', 'Local database purged.');
+      };
+
+      const handlePurgeDatabase = () => {
+        requestConfirm({
+          title: 'Purge Local Database',
+          message: 'This permanently erases all accounts, documents, contacts, and expenses stored on this device. This cannot be undone.',
+          confirmLabel: 'Erase Everything',
+          danger: true,
+          onConfirm: performPurgeDatabase
+        });
       };
 
       // ---------------- FILE UPLOAD / AI PARSING ----------------
@@ -1130,7 +1228,7 @@ Rules:
             });
             setParsing(false);
           } else {
-            alert('Unsupported file type. Please upload a PDF, CSV, or image (JPG/PNG).');
+            showToast('error', 'Unsupported file type. Please upload a PDF, CSV, or image (JPG/PNG).');
             setParsing(false);
           }
         } catch (err) {
@@ -1522,9 +1620,53 @@ Rules:
         );
       };
 
+      const toastStyles = {
+        success: { border: 'border-emerald-500/40', bg: 'bg-emerald-950/95', text: 'text-emerald-200', icon: 'check-circle', iconColor: 'text-emerald-400' },
+        error: { border: 'border-rose-500/40', bg: 'bg-rose-950/95', text: 'text-rose-200', icon: 'alert-circle', iconColor: 'text-rose-400' },
+        warning: { border: 'border-amber-500/40', bg: 'bg-amber-950/95', text: 'text-amber-200', icon: 'alert-triangle', iconColor: 'text-amber-400' },
+        info: { border: 'border-blue-500/40', bg: 'bg-blue-950/95', text: 'text-blue-200', icon: 'info', iconColor: 'text-blue-400' }
+      };
+
+      const toastContainer = (
+        <div className="no-print fixed bottom-4 inset-x-4 sm:inset-x-auto sm:right-4 sm:w-96 z-[100] space-y-2 pointer-events-none">
+          {toasts.map((t) => {
+            const style = toastStyles[t.type] || toastStyles.info;
+            return (
+              <div key={t.id} className={`toast-item pointer-events-auto flex items-start gap-2.5 rounded-lg border ${style.border} ${style.bg} ${style.text} px-3.5 py-3 text-xs shadow-2xl`}>
+                <i data-lucide={style.icon} className={`w-4 h-4 mt-0.5 shrink-0 ${style.iconColor}`}></i>
+                <span className="flex-1">{t.message}</span>
+                <button onClick={() => dismissToast(t.id)} className="text-current opacity-60 hover:opacity-100">✕</button>
+              </div>
+            );
+          })}
+        </div>
+      );
+
+      const confirmModalEl = confirmModal && (
+        <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4 z-[110]">
+          <div className="bg-slate-800 border border-slate-700 rounded-xl p-6 max-w-sm w-full space-y-4 shadow-2xl">
+            <div className="flex items-start gap-3">
+              <div className={`p-2 rounded-lg shrink-0 ${confirmModal.danger ? 'bg-rose-500/10 text-rose-400' : 'bg-blue-500/10 text-blue-400'}`}>
+                <i data-lucide={confirmModal.danger ? 'alert-triangle' : 'help-circle'} className="w-5 h-5"></i>
+              </div>
+              <div>
+                <h3 className="text-sm font-bold text-slate-100">{confirmModal.title}</h3>
+                <p className="text-xs text-slate-400 mt-1">{confirmModal.message}</p>
+              </div>
+            </div>
+            <div className="flex justify-end gap-2">
+              <button onClick={handleConfirmModalCancel} className="px-4 py-2 rounded-lg text-xs bg-slate-700 hover:bg-slate-600 text-slate-200">Cancel</button>
+              <button onClick={handleConfirmModalConfirm} className={`px-4 py-2 rounded-lg text-xs font-medium text-white shadow-md ${confirmModal.danger ? 'bg-rose-600 hover:bg-rose-500' : 'bg-emerald-600 hover:bg-emerald-500'}`}>{confirmModal.confirmLabel}</button>
+            </div>
+          </div>
+        </div>
+      );
+
       if (isLocked) {
         return (
-          <div className="min-h-screen flex items-center justify-center p-6 bg-slate-900">
+          <React.Fragment>
+            {toastContainer}
+            <div className="min-h-screen flex items-center justify-center p-6 bg-slate-900">
             <div className="bg-slate-800 border border-slate-700 rounded-xl p-8 max-w-sm w-full text-center space-y-4 shadow-2xl">
               <div className="mx-auto w-14 h-14 rounded-full bg-emerald-500/10 text-emerald-400 flex items-center justify-center border border-emerald-500/20">
                 <i data-lucide="lock" className="w-7 h-7"></i>
@@ -1557,11 +1699,14 @@ Rules:
               </details>
             </div>
           </div>
+          </React.Fragment>
         );
       }
 
       return (
         <div className="p-6">
+          {toastContainer}
+          {confirmModalEl}
           <div className="max-w-6xl mx-auto space-y-6">
 
             {/* HEADER */}
@@ -2714,7 +2859,12 @@ Rules:
       navigator.serviceWorker.addEventListener('controllerchange', () => {
         if (hasReloadedForUpdate) return;
         hasReloadedForUpdate = true;
-        window.location.reload();
+        if (window.__vaultShowToast) {
+          window.__vaultShowToast('info', 'Updating to the latest version...');
+          setTimeout(() => window.location.reload(), 700);
+        } else {
+          window.location.reload();
+        }
       });
 
       window.addEventListener('load', () => {
