@@ -3,7 +3,7 @@
 // app opens and functions offline. All financial data itself lives in
 // IndexedDB/localStorage in the browser, not in this cache.
 
-const CACHE_VERSION = 'finvault-v6';
+const CACHE_VERSION = 'finvault-v7';
 
 const APP_SHELL = [
   './',

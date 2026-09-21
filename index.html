@@ -108,6 +108,88 @@
 
     const CATEGORIES = ['Housing/Mortgage', 'Utilities', 'Insurance', 'Subscriptions', 'Debt Service', 'Transportation', 'Lifestyle', 'Other'];
 
+    const HELP_CARDS = [
+      {
+        icon: 'shield',
+        iconColor: 'text-emerald-400',
+        title: 'Welcome to Financial Vault',
+        body: [
+          'Everything here — accounts, documents, budget, goals — lives only in this browser. No server, no account, no sync.',
+          'AI-assisted statement parsing is optional and uses your own Groq API key, entered in Settings. Without a key, the app still works using simple offline parsing.',
+          'This quick tour covers each tab. You can reopen it anytime from the ? button.'
+        ]
+      },
+      {
+        icon: 'database',
+        iconColor: 'text-emerald-400',
+        title: 'Asset & Liability Vault',
+        body: [
+          'Drop in a statement — PDF, CSV, or a photo — and it reads the institution, balance, APR, and statement date for you to confirm before saving.',
+          'Every upload is stored so you can view or replace it later, and accounts flag themselves when their statement gets old.',
+          'For a mortgage or auto loan, add the asset\'s current value so your net worth reflects real equity, not just the debt.'
+        ]
+      },
+      {
+        icon: 'pie-chart',
+        iconColor: 'text-amber-400',
+        title: 'Budget & Expenses',
+        body: [
+          'Log recurring bills with a due day of the month — the dashboard shows what\'s due soon.',
+          'Typing a bill name auto-suggests a category (rent, utilities, subscriptions, etc.).',
+          'When a parsed statement reveals a recurring charge, you\'ll be offered a one-click way to add it here too.'
+        ]
+      },
+      {
+        icon: 'target',
+        iconColor: 'text-blue-400',
+        title: 'Goals',
+        body: [
+          'Set a savings target or a debt payoff goal. Link it to an account and progress tracks itself as that account\'s balance changes.',
+          'No account to link? Track it manually — just update the current amount whenever you check in.',
+          'Once there\'s a little history, you\'ll get a projected completion date based on the recent trend.'
+        ]
+      },
+      {
+        icon: 'trending-up',
+        iconColor: 'text-emerald-400',
+        title: 'Strategic Capital Allocation',
+        body: [
+          'A plain-math read of your accounts — no AI needed here.',
+          'Flags high-interest debt worth targeting first, and idle cash sitting in low-yield accounts that could work harder.'
+        ]
+      },
+      {
+        icon: 'sparkles',
+        iconColor: 'text-purple-400',
+        title: 'Wealth Strategy & Advisor Chat',
+        body: [
+          'Generate an AI report on your whole financial picture: strengths, risks, and prioritized strategies to consider.',
+          'Use "Discuss With Advisor" to ask follow-up questions — it discusses upside and downside for whatever you\'re weighing, grounded in your real numbers.',
+          'Requires a Groq API key. Export the report to PDF or print it directly.'
+        ]
+      },
+      {
+        icon: 'life-buoy',
+        iconColor: 'text-rose-400',
+        title: 'Continuity Plan',
+        body: [
+          'Key contacts, per-account notes, and handoff instructions — everything someone else would need if they had to take this over.',
+          'The readiness checklist shows what\'s actually in place, honestly.',
+          'One click compiles it all into a settlement-ready PDF.'
+        ]
+      },
+      {
+        icon: 'settings',
+        iconColor: 'text-slate-300',
+        title: 'Settings & Your Data',
+        body: [
+          'A Groq API key is optional and unlocks AI parsing, recurring-charge detection, and the strategy report/chat.',
+          'PIN lock (off by default) gates the app screen on this device — it\'s not encryption, just a lock screen.',
+          'Export a JSON backup regularly — it\'s your only copy. This app can also be installed to your home screen and works offline.'
+        ]
+      }
+    ];
+
     const GROQ_ENDPOINT = 'https://api.groq.com/openai/v1/chat/completions';
     const DEFAULT_TEXT_MODEL = 'openai/gpt-oss-120b';
     const DEFAULT_VISION_MODEL = 'qwen/qwen3.6-27b';
@@ -602,6 +684,9 @@ ${JSON.stringify(contextPayload)}`;
       const [pendingParsedData, setPendingParsedData] = useState(null);
       const [isSettingsOpen, setIsSettingsOpen] = useState(false);
       const [viewingDocument, setViewingDocument] = useState(null);
+      const [helpOpen, setHelpOpen] = useState(false);
+      const [helpCardIndex, setHelpCardIndex] = useState(0);
+      const helpAutoShownRef = useRef(false);
 
       const [form, setForm] = useState({
         institution: '',
@@ -709,6 +794,20 @@ ${JSON.stringify(contextPayload)}`;
         }
       }, [isLocked]);
 
+      // First-ever visit: auto-open the intro cards once, after unlock (not on the lock screen)
+      useEffect(() => {
+        if (isLocked) return;
+        if (helpAutoShownRef.current) return;
+        helpAutoShownRef.current = true;
+        try {
+          if (!localStorage.getItem('vault_help_seen')) {
+            setHelpOpen(true);
+            setHelpCardIndex(0);
+            localStorage.setItem('vault_help_seen', '1');
+          }
+        } catch (e) { /* storage unavailable — skip auto-intro */ }
+      }, [isLocked]);
+
       // Bridge so the plain <script> service-worker registration (outside React) can surface a themed toast
       useEffect(() => {
         window.__vaultShowToast = (type, message) => showToast(type, message);
@@ -730,7 +829,7 @@ ${JSON.stringify(contextPayload)}`;
 
       useEffect(() => {
         if (window.lucide) window.lucide.createIcons();
-      }, [records, expenses, documents, contacts, activeTab, parsing, pendingParsedData, isSettingsOpen, viewingDocument, expenseCategoryFilter, expenseSearchQuery, strategyReport, strategyLoading, installPromptEvent, isLocked, pinError, pinLockEnabled, showPinSetup, toasts, confirmModal, strategyChatOpen, strategyChatMessages, strategyChatLoading, goals, accountHistory, editingGoalId]);
+      }, [records, expenses, documents, contacts, activeTab, parsing, pendingParsedData, isSettingsOpen, viewingDocument, expenseCategoryFilter, expenseSearchQuery, strategyReport, strategyLoading, installPromptEvent, isLocked, pinError, pinLockEnabled, showPinSetup, toasts, confirmModal, strategyChatOpen, strategyChatMessages, strategyChatLoading, goals, accountHistory, editingGoalId, helpOpen, helpCardIndex]);
 
       const loadAllData = async () => {
         try {
@@ -2003,6 +2102,71 @@ ${JSON.stringify(contextPayload)}`;
         </div>
       );
 
+      const helpModalEl = helpOpen && (
+        <div className="no-print fixed inset-0 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4 z-[105]">
+          <div className="bg-slate-800 border border-slate-700 rounded-xl w-full max-w-md shadow-2xl flex flex-col">
+            <div className="flex justify-between items-center px-5 pt-4">
+              <span className="text-[10px] text-slate-500 font-mono">{helpCardIndex + 1} / {HELP_CARDS.length}</span>
+              <button onClick={() => setHelpOpen(false)} className="text-slate-400 hover:text-slate-200 text-xs">✕ Close</button>
+            </div>
+
+            <div className="px-6 py-6 text-center space-y-3">
+              <div className={`mx-auto w-14 h-14 rounded-full bg-slate-900 border border-slate-700 flex items-center justify-center ${HELP_CARDS[helpCardIndex].iconColor}`}>
+                <i data-lucide={HELP_CARDS[helpCardIndex].icon} className="w-7 h-7"></i>
+              </div>
+              <h3 className="text-base font-bold text-slate-100">{HELP_CARDS[helpCardIndex].title}</h3>
+              <div className="space-y-2 text-left">
+                {HELP_CARDS[helpCardIndex].body.map((line, i) => (
+                  <p key={i} className="text-xs text-slate-400 flex items-start gap-2">
+                    <i data-lucide="circle" className="w-2 h-2 mt-1.5 shrink-0 text-slate-600"></i>
+                    <span>{line}</span>
+                  </p>
+                ))}
+              </div>
+            </div>
+
+            <div className="flex items-center justify-center gap-1.5 pb-4">
+              {HELP_CARDS.map((_, i) => (
+                <button
+                  key={i}
+                  onClick={() => setHelpCardIndex(i)}
+                  className={`h-1.5 rounded-full transition-all ${i === helpCardIndex ? 'w-5 bg-emerald-500' : 'w-1.5 bg-slate-600 hover:bg-slate-500'}`}
+                  aria-label={`Go to card ${i + 1}`}
+                />
+              ))}
+            </div>
+
+            <div className="flex gap-2 border-t border-slate-700 p-4">
+              <button
+                type="button"
+                onClick={() => setHelpCardIndex(i => Math.max(0, i - 1))}
+                disabled={helpCardIndex === 0}
+                className="flex-1 bg-slate-700 hover:bg-slate-600 disabled:opacity-40 disabled:cursor-not-allowed text-slate-200 py-2 rounded-lg text-xs font-medium transition"
+              >
+                Back
+              </button>
+              {helpCardIndex < HELP_CARDS.length - 1 ? (
+                <button
+                  type="button"
+                  onClick={() => setHelpCardIndex(i => Math.min(HELP_CARDS.length - 1, i + 1))}
+                  className="flex-1 bg-emerald-600 hover:bg-emerald-500 text-white py-2 rounded-lg text-xs font-medium transition"
+                >
+                  Next
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => setHelpOpen(false)}
+                  className="flex-1 bg-emerald-600 hover:bg-emerald-500 text-white py-2 rounded-lg text-xs font-medium transition"
+                >
+                  Got it
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      );
+
       const strategyChatModalEl = strategyChatOpen && (
         <div className="no-print fixed inset-0 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4 z-[105]">
           <div className="bg-slate-800 border border-slate-700 rounded-xl w-full max-w-2xl shadow-2xl flex flex-col" style={{ maxHeight: '85vh' }}>
@@ -2104,6 +2268,7 @@ ${JSON.stringify(contextPayload)}`;
           {toastContainer}
           {confirmModalEl}
           {strategyChatModalEl}
+          {helpModalEl}
           <div className="max-w-6xl mx-auto space-y-6">
 
             {/* HEADER */}
@@ -2138,6 +2303,13 @@ ${JSON.stringify(contextPayload)}`;
                     <i data-lucide="lock" className="w-5 h-5"></i>
                   </button>
                 )}
+                <button
+                  onClick={() => { setHelpOpen(true); setHelpCardIndex(0); }}
+                  className="flex items-center justify-center p-2.5 bg-slate-700 hover:bg-slate-600 text-slate-200 rounded-lg transition"
+                  title="How this app works"
+                >
+                  <i data-lucide="help-circle" className="w-5 h-5"></i>
+                </button>
                 <button
                   onClick={() => setIsSettingsOpen(true)}
                   className="flex items-center justify-center p-2.5 bg-slate-700 hover:bg-slate-600 text-slate-200 rounded-lg transition"
