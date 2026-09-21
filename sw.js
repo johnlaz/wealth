@@ -3,19 +3,19 @@
 // app opens and functions offline. All financial data itself lives in
 // IndexedDB/localStorage in the browser, not in this cache.
 
-const CACHE_VERSION = 'finvault-v8';
+const CACHE_VERSION = 'finvault-v11';
 
 const APP_SHELL = [
   './',
   './index.html',
   './manifest.json',
-  './icons/icon-192.png',
-  './icons/icon-512.png',
-  './icons/icon-192-maskable.png',
-  './icons/icon-512-maskable.png',
-  './icons/icon-180.png',
-  './icons/favicon-32.png',
-  './icons/favicon-16.png'
+  './icon-192.png',
+  './icon-512.png',
+  './icon-192-maskable.png',
+  './icon-512-maskable.png',
+  './icon-180.png',
+  './favicon-32.png',
+  './favicon-16.png'
 ];
 
 // Third-party libraries the app depends on — cached so the app still loads
