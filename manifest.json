@@ -4,7 +4,6 @@
   "description": "Local-first net worth, budget, and estate continuity tracker with AI-assisted statement parsing.",
   "start_url": "./index.html",
   "scope": "./",
-  "id": "/financial-vault/",
   "display": "standalone",
   "orientation": "any",
   "background_color": "#0f172a",
