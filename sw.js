@@ -3,7 +3,7 @@
 // app opens and functions offline. All financial data itself lives in
 // IndexedDB/localStorage in the browser, not in this cache.
 
-const CACHE_VERSION = 'finvault-v11';
+const CACHE_VERSION = 'finvault-v12';
 
 const APP_SHELL = [
   './',
@@ -29,7 +29,7 @@ const CDN_ASSETS = [
   'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js',
   'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js',
   'https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js',
-  'https://unpkg.com/lucide@latest'
+  'https://unpkg.com/lucide@1.47.0'
 ];
 
 self.addEventListener('install', (event) => {
