@@ -459,6 +459,7 @@ Rules:
         dueDay: '1',
         autoPay: true
       });
+      const [editingExpenseId, setEditingExpenseId] = useState(null);
 
       const [contactForm, setContactForm] = useState({
         name: '', role: '', phone: '', email: '', notes: ''
@@ -589,8 +590,8 @@ Rules:
         e.preventDefault();
         if (!expForm.name || !expForm.amount) return;
 
-        const newExp = {
-          id: 'exp_' + Date.now(),
+        const expRecord = {
+          id: editingExpenseId || ('exp_' + Date.now()),
           name: expForm.name,
           category: expForm.category,
           amount: parseFloat(expForm.amount) || 0,
@@ -598,9 +599,26 @@ Rules:
           autoPay: expForm.autoPay
         };
 
-        await saveDBItem(STORES.EXPENSES, newExp);
+        await saveDBItem(STORES.EXPENSES, expRecord);
         setExpForm({ name: '', category: 'Housing/Mortgage', amount: '', dueDay: '1', autoPay: true });
+        setEditingExpenseId(null);
         loadAllData();
+      };
+
+      const handleEditExpenseClick = (exp) => {
+        setExpForm({
+          name: exp.name,
+          category: exp.category,
+          amount: exp.amount,
+          dueDay: String(exp.dueDay || 1),
+          autoPay: exp.autoPay
+        });
+        setEditingExpenseId(exp.id);
+      };
+
+      const handleCancelEditExpense = () => {
+        setExpForm({ name: '', category: 'Housing/Mortgage', amount: '', dueDay: '1', autoPay: true });
+        setEditingExpenseId(null);
       };
 
       const handleExpenseNameChange = (nameVal) => {
@@ -699,6 +717,10 @@ Rules:
 
       const handleDeleteExpense = async (id) => {
         await deleteDBItem(STORES.EXPENSES, id);
+        if (editingExpenseId === id) {
+          setEditingExpenseId(null);
+          setExpForm({ name: '', category: 'Housing/Mortgage', amount: '', dueDay: '1', autoPay: true });
+        }
         loadAllData();
       };
 
@@ -1663,7 +1685,7 @@ Rules:
 
                   <form onSubmit={handleAddExpense} className="bg-slate-800 p-5 rounded-xl border border-slate-700 space-y-3">
                     <h2 className="text-sm font-semibold uppercase tracking-wider text-slate-300 flex items-center gap-2">
-                      <i data-lucide="plus" className="w-4 h-4 text-emerald-400"></i> Add Recurring Expense
+                      <i data-lucide={editingExpenseId ? 'pencil' : 'plus'} className="w-4 h-4 text-emerald-400"></i> {editingExpenseId ? 'Edit Expense' : 'Add Recurring Expense'}
                     </h2>
                     <div>
                       <label className="text-[10px] text-slate-400 block mb-1">Expense Name (Auto-Categorizes)</label>
@@ -1700,7 +1722,12 @@ Rules:
                       </label>
                     </div>
 
-                    <button type="submit" className="w-full bg-slate-700 hover:bg-slate-600 text-slate-100 font-medium py-2 rounded-lg text-xs transition">Add Expense</button>
+                    <div className="flex gap-2">
+                      <button type="submit" className="flex-1 bg-slate-700 hover:bg-slate-600 text-slate-100 font-medium py-2 rounded-lg text-xs transition">{editingExpenseId ? 'Save Changes' : 'Add Expense'}</button>
+                      {editingExpenseId && (
+                        <button type="button" onClick={handleCancelEditExpense} className="px-3 bg-slate-900 border border-slate-700 rounded-lg text-xs text-slate-300">Cancel</button>
+                      )}
+                    </div>
                   </form>
 
                   {upcomingBills.length > 0 && (
@@ -1771,8 +1798,9 @@ Rules:
                                 <td className="py-2.5 text-slate-400">{exp.dueDay ? `Day ${exp.dueDay}` : '—'}</td>
                                 <td className="py-2.5">{exp.autoPay ? <span className="text-emerald-400 font-semibold">Active</span> : <span className="text-slate-500">Manual</span>}</td>
                                 <td className="py-2.5 font-bold text-amber-400">${exp.amount.toLocaleString('en-US', { minimumFractionDigits: 2 })}</td>
-                                <td className="py-2.5 text-right">
-                                  <button onClick={() => handleDeleteExpense(exp.id)} className="text-slate-500 hover:text-rose-400"><i data-lucide="trash-2" className="w-4 h-4"></i></button>
+                                <td className="py-2.5 text-right whitespace-nowrap">
+                                  <button onClick={() => handleEditExpenseClick(exp)} title="Edit" className="text-slate-500 hover:text-amber-400 mr-2"><i data-lucide="pencil" className="w-4 h-4 inline"></i></button>
+                                  <button onClick={() => handleDeleteExpense(exp.id)} title="Delete" className="text-slate-500 hover:text-rose-400"><i data-lucide="trash-2" className="w-4 h-4 inline"></i></button>
                                 </td>
                               </tr>
                             ))}
@@ -2476,6 +2504,16 @@ Rules:
   <!-- Service worker registration (plain script, runs independent of the React/Babel bundle above) -->
   <script>
     if ('serviceWorker' in navigator) {
+      // When a newly-deployed service worker takes control of this page,
+      // auto-reload ONCE so you actually see the update instead of running
+      // stale cached code until a second manual refresh.
+      let hasReloadedForUpdate = false;
+      navigator.serviceWorker.addEventListener('controllerchange', () => {
+        if (hasReloadedForUpdate) return;
+        hasReloadedForUpdate = true;
+        window.location.reload();
+      });
+
       window.addEventListener('load', () => {
         navigator.serviceWorker.register('sw.js').catch((err) => {
           console.warn('Service worker registration failed:', err);
