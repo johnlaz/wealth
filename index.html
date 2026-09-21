@@ -2,6 +2,28 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
+  <style>html, body { background-color: #0f172a; }</style>
+  <script>
+    // Watchdog: this app loads several render-blocking CDN scripts in sequence
+    // before it can mount (React, Babel-in-browser, pdf.js, etc.). If any one
+    // of them stalls, the page just sits there with nothing painted. Rather
+    // than make the user notice and manually refresh, auto-retry once.
+    (function () {
+      try {
+        var alreadyRetried = sessionStorage.getItem('vault_auto_retry') === '1';
+        setTimeout(function () {
+          if (!window.__vaultMounted) {
+            if (!alreadyRetried) {
+              sessionStorage.setItem('vault_auto_retry', '1');
+              window.location.reload();
+            }
+            // If we already auto-retried once and it STILL hasn't mounted,
+            // stop trying — a real outage shouldn't reload forever.
+          }
+        }, 7000);
+      } catch (e) { /* sessionStorage unavailable (e.g. private mode) — skip watchdog */ }
+    })();
+  </script>
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <title>Financial Vault & Capital Allocator</title>
 
@@ -274,7 +296,7 @@ Rules:
 - Assets (checking, savings, brokerage) are positive balances; liabilities (credit card, loan, mortgage) should have category "Liability".
 - Output must be valid JSON and nothing else.`;
 
-    const callGroq = async (apiKey, body) => {
+    const callGroqCompletion = async (apiKey, body) => {
       const res = await fetch(GROQ_ENDPOINT, {
         method: 'POST',
         headers: {
@@ -288,11 +310,18 @@ Rules:
         throw new Error(`Groq API error ${res.status}: ${errText}`);
       }
       const data = await res.json();
-      const content = data && data.choices && data.choices[0] && data.choices[0].message
+      return data && data.choices && data.choices[0] && data.choices[0].message
         ? data.choices[0].message.content
         : '';
+    };
+
+    const callGroq = async (apiKey, body) => {
+      const content = await callGroqCompletion(apiKey, body);
       return parseJsonLoose(content);
     };
+
+    // Raw conversational text — no JSON parsing — for the advisor chat
+    const callGroqText = async (apiKey, body) => callGroqCompletion(apiKey, body);
 
     const extractWithGroqText = async (fullText, apiKey, model) => {
       const truncated = fullText.slice(0, 14000);
@@ -387,6 +416,15 @@ Rules:
 - "strategies" is an ordered list of 3-6 concrete, actionable recommendations (debt payoff order, emergency fund sizing, high-yield cash sweep, expense category concerns, etc.), each with a clear priority.
 - "cashflowNotes" should end with a brief plain-language disclaimer that this is not professional financial or tax advice and the user should confirm significant moves with a licensed advisor.
 - Output must be valid JSON and nothing else.`;
+
+    const buildAdvisorChatSystemPrompt = (contextPayload) => `You are a knowledgeable, candid personal financial advisor in an ongoing conversation with the user about their own finances. You have their current financial snapshot and the wealth strategy report already generated for them, both provided below as JSON — ground every answer strictly in that data, never invent accounts, balances, or figures.
+
+You are not a licensed financial advisor and this is not professional financial or tax advice. You don't need to repeat that disclaimer every single message, but bring it up again naturally if the conversation heads toward a specific high-stakes decision (a large purchase, payoff prioritization, an investment allocation) or if the user directly asks "should I."
+
+When you discuss a strategy, option, or "what if" scenario, give a balanced take: the upside, then the downside or risk, then — if relevant — a concrete next step. Keep responses conversational and reasonably short (a few short paragraphs or a short bulleted list) rather than another full report. Ask a clarifying question if the user's request is ambiguous instead of guessing.
+
+Current financial snapshot and prior strategy report:
+${JSON.stringify(contextPayload)}`;
 
     const normalizeRecurringCharges = (list) => {
       if (!Array.isArray(list)) return [];
@@ -497,6 +535,12 @@ Rules:
       const [strategyReport, setStrategyReport] = useState(null);
       const [strategyLoading, setStrategyLoading] = useState(false);
       const [strategyError, setStrategyError] = useState('');
+
+      const [strategyChatOpen, setStrategyChatOpen] = useState(false);
+      const [strategyChatMessages, setStrategyChatMessages] = useState([]);
+      const [strategyChatInput, setStrategyChatInput] = useState('');
+      const [strategyChatLoading, setStrategyChatLoading] = useState(false);
+      const strategyChatScrollRef = useRef(null);
 
       const [availableModels, setAvailableModels] = useState([]);
       const [modelsFetching, setModelsFetching] = useState(false);
@@ -624,6 +668,12 @@ Rules:
         return () => { delete window.__vaultShowToast; };
       }, []);
 
+      useEffect(() => {
+        if (strategyChatOpen && strategyChatScrollRef.current) {
+          strategyChatScrollRef.current.scrollTop = strategyChatScrollRef.current.scrollHeight;
+        }
+      }, [strategyChatMessages, strategyChatOpen, strategyChatLoading]);
+
       const handleInstallClick = async () => {
         if (!installPromptEvent) return;
         installPromptEvent.prompt();
@@ -633,7 +683,7 @@ Rules:
 
       useEffect(() => {
         if (window.lucide) window.lucide.createIcons();
-      }, [records, expenses, documents, contacts, activeTab, parsing, pendingParsedData, isSettingsOpen, viewingDocument, expenseCategoryFilter, expenseSearchQuery, strategyReport, strategyLoading, installPromptEvent, isLocked, pinError, pinLockEnabled, showPinSetup, toasts, confirmModal]);
+      }, [records, expenses, documents, contacts, activeTab, parsing, pendingParsedData, isSettingsOpen, viewingDocument, expenseCategoryFilter, expenseSearchQuery, strategyReport, strategyLoading, installPromptEvent, isLocked, pinError, pinLockEnabled, showPinSetup, toasts, confirmModal, strategyChatOpen, strategyChatMessages, strategyChatLoading]);
 
       const loadAllData = async () => {
         try {
@@ -1428,6 +1478,30 @@ Rules:
       };
 
       // ---------------- WEALTH STRATEGY (GROQ GOALS REPORT) ----------------
+      const buildFinancialSnapshot = () => ({
+        monthlyIncome,
+        monthlyNetCashflow,
+        totalAssets,
+        totalLiabilities,
+        netWorth,
+        accounts: records.map(r => ({
+          institution: r.institution,
+          type: r.accountType,
+          category: r.category,
+          balance: r.balance,
+          interestRate: r.interestRate,
+          statementAgeDays: getStaleness(r.statementDate, staleDays).age,
+          linkedAssetLabel: r.linkedAssetLabel || undefined,
+          linkedAssetValue: parseFloat(r.linkedAssetValue) || undefined,
+          equity: parseFloat(r.linkedAssetValue) > 0 ? (parseFloat(r.linkedAssetValue) - r.balance) : undefined
+        })),
+        monthlyExpensesByCategory: CATEGORIES.map(c => ({
+          category: c,
+          total: expenses.filter(e => e.category === c).reduce((a, e) => a + e.amount, 0)
+        })).filter(c => c.total > 0),
+        netWorthHistory: networthHistory.slice(-12).map(h => ({ date: h.date, netWorth: h.netWorth }))
+      });
+
       const generateWealthStrategy = async () => {
         if (!groqApiKey) {
           setStrategyError('Add a Groq API key in Settings to generate a wealth strategy report.');
@@ -1436,29 +1510,7 @@ Rules:
         setStrategyLoading(true);
         setStrategyError('');
         try {
-          const payload = {
-            monthlyIncome,
-            monthlyNetCashflow,
-            totalAssets,
-            totalLiabilities,
-            netWorth,
-            accounts: records.map(r => ({
-              institution: r.institution,
-              type: r.accountType,
-              category: r.category,
-              balance: r.balance,
-              interestRate: r.interestRate,
-              statementAgeDays: getStaleness(r.statementDate, staleDays).age,
-              linkedAssetLabel: r.linkedAssetLabel || undefined,
-              linkedAssetValue: parseFloat(r.linkedAssetValue) || undefined,
-              equity: parseFloat(r.linkedAssetValue) > 0 ? (parseFloat(r.linkedAssetValue) - r.balance) : undefined
-            })),
-            monthlyExpensesByCategory: CATEGORIES.map(c => ({
-              category: c,
-              total: expenses.filter(e => e.category === c).reduce((a, e) => a + e.amount, 0)
-            })).filter(c => c.total > 0),
-            netWorthHistory: networthHistory.slice(-12).map(h => ({ date: h.date, netWorth: h.netWorth }))
-          };
+          const payload = buildFinancialSnapshot();
 
           const result = await callGroq(groqApiKey, {
             model: textModel,
@@ -1480,6 +1532,41 @@ Rules:
           setStrategyError('Report generation failed: ' + err.message + ' — if this says a model doesn\'t exist or isn\'t accessible, go to Settings and use "Fetch Models" to pick one your key can actually use.');
         } finally {
           setStrategyLoading(false);
+        }
+      };
+
+      const handleSendStrategyChat = async (e) => {
+        e.preventDefault();
+        const question = strategyChatInput.trim();
+        if (!question || strategyChatLoading) return;
+
+        if (!groqApiKey) {
+          showToast('error', 'Add a Groq API key in Settings to use the advisor chat.');
+          return;
+        }
+
+        const userMsg = { role: 'user', content: question };
+        const updatedMessages = [...strategyChatMessages, userMsg];
+        setStrategyChatMessages(updatedMessages);
+        setStrategyChatInput('');
+        setStrategyChatLoading(true);
+
+        try {
+          const contextPayload = { ...buildFinancialSnapshot(), strategyReport };
+          const replyText = await callGroqText(groqApiKey, {
+            model: textModel,
+            temperature: 0.4,
+            messages: [
+              { role: 'system', content: buildAdvisorChatSystemPrompt(contextPayload) },
+              ...updatedMessages
+            ]
+          });
+          setStrategyChatMessages(prev => [...prev, { role: 'assistant', content: replyText || "I didn't get a usable response — try asking again." }]);
+        } catch (err) {
+          console.error('Advisor chat failed:', err);
+          setStrategyChatMessages(prev => [...prev, { role: 'assistant', content: `Something went wrong reaching Groq: ${err.message}` }]);
+        } finally {
+          setStrategyChatLoading(false);
         }
       };
 
@@ -1662,6 +1749,61 @@ Rules:
         </div>
       );
 
+      const strategyChatModalEl = strategyChatOpen && (
+        <div className="no-print fixed inset-0 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4 z-[105]">
+          <div className="bg-slate-800 border border-slate-700 rounded-xl w-full max-w-2xl shadow-2xl flex flex-col" style={{ maxHeight: '85vh' }}>
+            <div className="flex justify-between items-start border-b border-slate-700 px-5 py-4">
+              <div>
+                <h3 className="text-sm font-bold text-slate-100 flex items-center gap-2">
+                  <i data-lucide="message-circle" className="w-4 h-4 text-blue-400"></i> Discuss Your Strategy
+                </h3>
+                <p className="text-[10px] text-slate-500 mt-0.5">Grounded in your current accounts, budget, and the report. Not professional financial advice.</p>
+              </div>
+              <div className="flex items-center gap-3 shrink-0">
+                {strategyChatMessages.length > 0 && (
+                  <button onClick={() => setStrategyChatMessages([])} className="text-[11px] text-slate-500 hover:text-slate-300">Clear</button>
+                )}
+                <button onClick={() => setStrategyChatOpen(false)} className="text-slate-400 hover:text-slate-200 text-xs">✕ Close</button>
+              </div>
+            </div>
+
+            <div ref={strategyChatScrollRef} className="flex-1 overflow-y-auto px-5 py-4 space-y-3">
+              {strategyChatMessages.length === 0 && (
+                <div className="text-xs text-slate-400 bg-slate-900/50 border border-slate-700 rounded-lg p-3">
+                  Ask about anything in the report — "What if I paid off the car loan first instead?", "Is my emergency fund big enough?", "What's the risk in that recommendation?" The advisor walks through upside and downside for whatever you're weighing, grounded in your actual numbers.
+                </div>
+              )}
+              {strategyChatMessages.map((m, i) => (
+                <div key={i} className={`flex ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                  <div className={`max-w-[85%] rounded-lg px-3.5 py-2.5 text-xs whitespace-pre-wrap ${m.role === 'user' ? 'bg-emerald-600/20 text-emerald-100 border border-emerald-600/30' : 'bg-slate-700/60 text-slate-200 border border-slate-600/40'}`}>
+                    {m.content}
+                  </div>
+                </div>
+              ))}
+              {strategyChatLoading && (
+                <div className="flex justify-start">
+                  <div className="bg-slate-700/60 border border-slate-600/40 rounded-lg px-3.5 py-2.5 text-xs text-slate-400">Thinking...</div>
+                </div>
+              )}
+            </div>
+
+            <form onSubmit={handleSendStrategyChat} className="border-t border-slate-700 p-3 flex gap-2">
+              <input
+                type="text"
+                value={strategyChatInput}
+                onChange={(e) => setStrategyChatInput(e.target.value)}
+                placeholder="Ask about a strategy, trade-off, or 'what if'..."
+                className="flex-1 bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-100 focus:outline-none focus:border-blue-500"
+                disabled={strategyChatLoading}
+              />
+              <button type="submit" disabled={strategyChatLoading || !strategyChatInput.trim()} className="bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white px-4 py-2 rounded-lg text-xs font-medium transition">
+                Send
+              </button>
+            </form>
+          </div>
+        </div>
+      );
+
       if (isLocked) {
         return (
           <React.Fragment>
@@ -1707,6 +1849,7 @@ Rules:
         <div className="p-6">
           {toastContainer}
           {confirmModalEl}
+          {strategyChatModalEl}
           <div className="max-w-6xl mx-auto space-y-6">
 
             {/* HEADER */}
@@ -2287,6 +2430,9 @@ Rules:
                     </button>
                     {strategyReport && (
                       <React.Fragment>
+                        <button onClick={() => setStrategyChatOpen(true)} className="flex items-center gap-2 bg-blue-600 hover:bg-blue-500 text-white px-4 py-2 rounded-lg text-xs font-medium transition">
+                          <i data-lucide="message-circle" className="w-4 h-4"></i> Discuss With Advisor
+                        </button>
                         <button onClick={generateStrategyPDF} className="flex items-center gap-2 bg-slate-700 hover:bg-slate-600 text-slate-100 px-4 py-2 rounded-lg text-xs font-medium transition">
                           <i data-lucide="download" className="w-4 h-4"></i> Export PDF
                         </button>
@@ -2847,6 +2993,8 @@ Rules:
 
     const root = ReactDOM.createRoot(document.getElementById('root'));
     root.render(<App />);
+    window.__vaultMounted = true;
+    try { sessionStorage.removeItem('vault_auto_retry'); } catch (e) { /* ignore */ }
   </script>
 
   <!-- Service worker registration (plain script, runs independent of the React/Babel bundle above) -->
