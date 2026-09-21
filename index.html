@@ -82,6 +82,7 @@
     const DEFAULT_TEXT_MODEL = 'openai/gpt-oss-120b';
     const DEFAULT_VISION_MODEL = 'qwen/qwen3.6-27b';
     const DEFAULT_STALE_DAYS = 60;
+    const BACKUP_STALE_DAYS = 30;
 
     // ============================================================
     // CLIENT-SIDE AUTO-CATEGORIZATION (used when no AI key is set)
@@ -395,6 +396,24 @@ Rules:
         }));
     };
 
+    // SHA-256 (with a non-cryptographic fallback for insecure/older contexts where
+    // SubtleCrypto isn't available). This is a local access gate, not encryption of
+    // the vault's data — the hash is only ever compared against on this device.
+    const sha256Hex = async (text) => {
+      try {
+        if (window.crypto && window.crypto.subtle) {
+          const enc = new TextEncoder().encode(text);
+          const buf = await window.crypto.subtle.digest('SHA-256', enc);
+          return Array.from(new Uint8Array(buf)).map((b) => b.toString(16).padStart(2, '0')).join('');
+        }
+      } catch (e) { /* fall through to the simple fallback below */ }
+      let hash = 0;
+      for (let i = 0; i < text.length; i++) {
+        hash = ((hash << 5) - hash + text.charCodeAt(i)) | 0;
+      }
+      return 'fb_' + Math.abs(hash).toString(16);
+    };
+
     const fileToDataUrl = (file) => new Promise((resolve, reject) => {
       const reader = new FileReader();
       reader.onload = () => resolve(reader.result);
@@ -417,6 +436,27 @@ Rules:
       const [notes, setNotes] = useState('');
       const [parsing, setParsing] = useState(false);
       const [parseError, setParseError] = useState('');
+
+      const [lastBackupAt, setLastBackupAt] = useState(() => {
+        try { return localStorage.getItem('last_backup_at') || ''; } catch (e) { return ''; }
+      });
+
+      // PIN lock — read synchronously so a locked vault never flashes its data before the lock renders
+      const [pinLockEnabled, setPinLockEnabled] = useState(() => {
+        try { return localStorage.getItem('pin_lock_enabled') === 'true'; } catch (e) { return false; }
+      });
+      const [pinHash, setPinHash] = useState(() => {
+        try { return localStorage.getItem('pin_hash') || ''; } catch (e) { return ''; }
+      });
+      const [isLocked, setIsLocked] = useState(() => {
+        try { return localStorage.getItem('pin_lock_enabled') === 'true' && !!localStorage.getItem('pin_hash'); } catch (e) { return false; }
+      });
+      const [pinInput, setPinInput] = useState('');
+      const [pinError, setPinError] = useState('');
+      const [showPinSetup, setShowPinSetup] = useState(false);
+      const [newPinValue, setNewPinValue] = useState('');
+      const [confirmPinValue, setConfirmPinValue] = useState('');
+      const [pinSetupError, setPinSetupError] = useState('');
 
       const [strategyReport, setStrategyReport] = useState(null);
       const [strategyLoading, setStrategyLoading] = useState(false);
@@ -488,6 +528,15 @@ Rules:
         if (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches) {
           setIsAppInstalled(true);
         }
+
+        // PWA manifest shortcuts land here with ?action=upload or ?action=expense
+        try {
+          const params = new URLSearchParams(window.location.search);
+          const action = params.get('action');
+          if (action === 'upload') setActiveTab('vault');
+          else if (action === 'expense') setActiveTab('budget');
+          if (action) window.history.replaceState({}, '', window.location.pathname);
+        } catch (e) { /* ignore */ }
       }, []);
 
       useEffect(() => {
@@ -516,7 +565,7 @@ Rules:
 
       useEffect(() => {
         if (window.lucide) window.lucide.createIcons();
-      }, [records, expenses, documents, contacts, activeTab, parsing, pendingParsedData, isSettingsOpen, viewingDocument, expenseCategoryFilter, expenseSearchQuery, strategyReport, strategyLoading, installPromptEvent]);
+      }, [records, expenses, documents, contacts, activeTab, parsing, pendingParsedData, isSettingsOpen, viewingDocument, expenseCategoryFilter, expenseSearchQuery, strategyReport, strategyLoading, installPromptEvent, isLocked, pinError, pinLockEnabled, showPinSetup]);
 
       const loadAllData = async () => {
         try {
@@ -764,6 +813,52 @@ Rules:
         localStorage.setItem('stale_days_threshold', n);
       };
 
+      // ---------------- PIN LOCK ----------------
+      const handleSavePin = async () => {
+        setPinSetupError('');
+        if (!/^[0-9]{4,8}$/.test(newPinValue)) {
+          setPinSetupError('PIN must be 4-8 digits.');
+          return;
+        }
+        if (newPinValue !== confirmPinValue) {
+          setPinSetupError('PINs do not match.');
+          return;
+        }
+        const hash = await sha256Hex(newPinValue);
+        localStorage.setItem('pin_hash', hash);
+        localStorage.setItem('pin_lock_enabled', 'true');
+        setPinHash(hash);
+        setPinLockEnabled(true);
+        setShowPinSetup(false);
+        setNewPinValue('');
+        setConfirmPinValue('');
+      };
+
+      const handleDisablePinLock = () => {
+        if (!confirm('Disable PIN lock? Anyone who opens this app on this device will see your vault without entering a PIN.')) return;
+        localStorage.removeItem('pin_lock_enabled');
+        localStorage.removeItem('pin_hash');
+        setPinLockEnabled(false);
+        setPinHash('');
+        setShowPinSetup(false);
+        setNewPinValue('');
+        setConfirmPinValue('');
+        setPinSetupError('');
+      };
+
+      const handleUnlockSubmit = async (e) => {
+        e.preventDefault();
+        const hash = await sha256Hex(pinInput);
+        if (hash === pinHash) {
+          setIsLocked(false);
+          setPinInput('');
+          setPinError('');
+        } else {
+          setPinError('Incorrect PIN.');
+          setPinInput('');
+        }
+      };
+
       const handleIncomeChange = (e) => {
         const val = parseFloat(e.target.value) || 0;
         setMonthlyIncome(val);
@@ -825,6 +920,10 @@ Rules:
         a.download = `Financial_Vault_Backup_${new Date().toISOString().slice(0, 10)}.json`;
         a.click();
         URL.revokeObjectURL(url);
+
+        const nowIso = new Date().toISOString();
+        try { localStorage.setItem('last_backup_at', nowIso); } catch (e) { /* storage unavailable */ }
+        setLastBackupAt(nowIso);
       };
 
       const handleRestoreBackup = (e) => {
@@ -1091,11 +1190,14 @@ Rules:
       // Continuity readiness checklist
       const accountsWithDocs = records.filter(r => r.documentId).length;
       const accountsCurrent = records.filter(r => !getStaleness(r.statementDate, staleDays).isStale).length;
+      const backupAgeDays = lastBackupAt ? daysBetween(lastBackupAt.slice(0, 10)) : null;
+      const isBackupStale = backupAgeDays === null || backupAgeDays > BACKUP_STALE_DAYS;
       const readinessItems = [
         { label: 'Executor / handoff notes written', done: notes.trim().length > 0 },
         { label: 'At least one key contact added', done: contacts.length > 0 },
         { label: `Accounts with a document on file (${accountsWithDocs}/${records.length || 0})`, done: records.length > 0 && accountsWithDocs === records.length },
-        { label: `Accounts with a current statement (${accountsCurrent}/${records.length || 0})`, done: records.length > 0 && accountsCurrent === records.length }
+        { label: `Accounts with a current statement (${accountsCurrent}/${records.length || 0})`, done: records.length > 0 && accountsCurrent === records.length },
+        { label: backupAgeDays === null ? 'No backup ever exported' : `Backup exported ${backupAgeDays} day(s) ago`, done: !isBackupStale }
       ];
 
       // ---------------- PDF EXPORT ----------------
@@ -1420,6 +1522,44 @@ Rules:
         );
       };
 
+      if (isLocked) {
+        return (
+          <div className="min-h-screen flex items-center justify-center p-6 bg-slate-900">
+            <div className="bg-slate-800 border border-slate-700 rounded-xl p-8 max-w-sm w-full text-center space-y-4 shadow-2xl">
+              <div className="mx-auto w-14 h-14 rounded-full bg-emerald-500/10 text-emerald-400 flex items-center justify-center border border-emerald-500/20">
+                <i data-lucide="lock" className="w-7 h-7"></i>
+              </div>
+              <div>
+                <h1 className="text-base font-bold text-slate-100">Financial Vault Locked</h1>
+                <p className="text-xs text-slate-400 mt-1">Enter your PIN to continue.</p>
+              </div>
+              <form onSubmit={handleUnlockSubmit} className="space-y-3">
+                <input
+                  type="password"
+                  inputMode="numeric"
+                  pattern="[0-9]*"
+                  autoFocus
+                  value={pinInput}
+                  onChange={(e) => setPinInput(e.target.value)}
+                  className="w-full text-center tracking-[0.5em] bg-slate-900 border border-slate-700 rounded-lg px-3 py-3 text-lg text-slate-100 focus:outline-none focus:border-emerald-500"
+                  placeholder="••••"
+                />
+                {pinError && <p className="text-xs text-rose-400">{pinError}</p>}
+                <button type="submit" className="w-full bg-emerald-600 hover:bg-emerald-500 text-white py-2.5 rounded-lg text-sm font-medium transition">Unlock</button>
+              </form>
+              <details className="text-left">
+                <summary className="text-[11px] text-slate-500 cursor-pointer hover:text-slate-400">Forgot your PIN?</summary>
+                <p className="text-[10px] text-slate-500 mt-2">
+                  Your vault data is safe — this PIN only gates this screen, it doesn't encrypt anything. To remove the lock without losing any data, open your browser's developer console on this page and run:
+                </p>
+                <code className="block bg-slate-900 rounded px-2 py-1 mt-1 text-[10px] text-slate-400 break-all">localStorage.removeItem('pin_lock_enabled')</code>
+                <p className="text-[10px] text-slate-500 mt-1">then reload the page.</p>
+              </details>
+            </div>
+          </div>
+        );
+      }
+
       return (
         <div className="p-6">
           <div className="max-w-6xl mx-auto space-y-6">
@@ -1445,6 +1585,15 @@ Rules:
                     title="Install as an app"
                   >
                     <i data-lucide="download" className="w-4 h-4"></i> Install App
+                  </button>
+                )}
+                {pinLockEnabled && (
+                  <button
+                    onClick={() => setIsLocked(true)}
+                    className="flex items-center justify-center p-2.5 bg-slate-700 hover:bg-slate-600 text-slate-200 rounded-lg transition"
+                    title="Lock now"
+                  >
+                    <i data-lucide="lock" className="w-5 h-5"></i>
                   </button>
                 )}
                 <button
@@ -2441,6 +2590,57 @@ Rules:
                       </select>
                     </div>
 
+                    {/* PIN LOCK */}
+                    <div className="p-4 bg-slate-900/60 rounded-lg border border-slate-700 space-y-2">
+                      <div className="flex items-center justify-between">
+                        <h4 className="text-xs font-bold text-slate-200 uppercase tracking-wider flex items-center gap-2">
+                          <i data-lucide="lock" className="w-4 h-4 text-blue-400"></i> PIN Lock
+                        </h4>
+                        <label className="relative inline-flex items-center cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={pinLockEnabled || showPinSetup}
+                            onChange={(e) => {
+                              if (e.target.checked) {
+                                setShowPinSetup(true);
+                                setPinSetupError('');
+                              } else if (pinLockEnabled) {
+                                handleDisablePinLock();
+                              } else {
+                                setShowPinSetup(false);
+                                setNewPinValue('');
+                                setConfirmPinValue('');
+                                setPinSetupError('');
+                              }
+                            }}
+                            className="sr-only peer"
+                          />
+                          <div className="w-9 h-5 bg-slate-700 peer-checked:bg-emerald-600 rounded-full transition-colors relative">
+                            <div className={`absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full transition-transform ${(pinLockEnabled || showPinSetup) ? 'translate-x-4' : ''}`}></div>
+                          </div>
+                        </label>
+                      </div>
+                      <p className="text-[11px] text-slate-400">
+                        Require a PIN to open this app on this device. This is a local access gate, not encryption — it doesn't scramble the data itself, it just keeps the screen locked until unlocked. Off by default.
+                      </p>
+
+                      {(pinLockEnabled || showPinSetup) && (
+                        <div className="space-y-2 pt-1">
+                          {pinLockEnabled && (
+                            <p className="text-[11px] text-emerald-400 flex items-center gap-1.5"><i data-lucide="check-circle" className="w-3.5 h-3.5"></i> PIN lock is on. Set or change your PIN below.</p>
+                          )}
+                          <div className="grid grid-cols-2 gap-2">
+                            <input type="password" inputMode="numeric" pattern="[0-9]*" placeholder="New PIN (4-8 digits)" value={newPinValue} onChange={(e) => setNewPinValue(e.target.value)} className="bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-100" />
+                            <input type="password" inputMode="numeric" pattern="[0-9]*" placeholder="Confirm PIN" value={confirmPinValue} onChange={(e) => setConfirmPinValue(e.target.value)} className="bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-100" />
+                          </div>
+                          {pinSetupError && <p className="text-[10px] text-rose-400">{pinSetupError}</p>}
+                          <button type="button" onClick={handleSavePin} className="w-full bg-slate-700 hover:bg-slate-600 text-slate-100 py-1.5 rounded-lg text-[11px] font-medium transition">
+                            {pinHash ? 'Update PIN' : 'Set PIN'}
+                          </button>
+                        </div>
+                      )}
+                    </div>
+
                     {/* EXPORT BACKUP */}
                     <div className="p-4 bg-slate-900/60 rounded-lg border border-slate-700 space-y-2">
                       <h4 className="text-xs font-bold text-slate-200 uppercase tracking-wider flex items-center gap-2">
@@ -2455,6 +2655,9 @@ Rules:
                       >
                         Download JSON Backup File
                       </button>
+                      <p className={`text-[10px] ${isBackupStale ? 'text-amber-400' : 'text-emerald-400'}`}>
+                        {backupAgeDays === null ? 'No backup exported yet.' : `Last backup: ${backupAgeDays} day(s) ago${isBackupStale ? ' — consider exporting a fresh one.' : '.'}`}
+                      </p>
                     </div>
 
                     {/* RESTORE BACKUP */}
