@@ -196,7 +196,7 @@
     const DEFAULT_VISION_MODEL = 'qwen/qwen3.6-27b';
     const DEFAULT_STALE_DAYS = 60;
     const BACKUP_STALE_DAYS = 30;
-    const APP_VERSION = 'finvault-v14';
+    const APP_VERSION = 'finvault-v15';
 
     // ============================================================
     // CLIENT-SIDE AUTO-CATEGORIZATION (used when no AI key is set)
@@ -2338,7 +2338,7 @@ Rules:
       );
 
       const helpModalEl = helpOpen && (
-        <div className="no-print fixed inset-0 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4 z-[105]">
+        <div className="no-print fixed inset-0 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4 z-50">
           <div className="bg-slate-800 border border-slate-700 rounded-xl w-full max-w-md shadow-2xl flex flex-col">
             <div className="flex justify-between items-center px-5 pt-4">
               <span className="text-[10px] text-slate-500 font-mono">{helpCardIndex + 1} / {HELP_CARDS.length}</span>
@@ -2403,10 +2403,10 @@ Rules:
       );
 
       const strategyChatModalEl = strategyChatOpen && (
-        <div className="no-print fixed inset-0 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4 z-[105]">
+        <div className="no-print fixed inset-0 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4 z-50">
           <div className="bg-slate-800 border border-slate-700 rounded-xl w-full max-w-2xl shadow-2xl flex flex-col" style={{ maxHeight: '85vh' }}>
             <div className="flex justify-between items-start border-b border-slate-700 px-5 py-4">
-              <div>
+              <div className="min-w-0">
                 <h3 className="text-sm font-bold text-slate-100 flex items-center gap-2">
                   <i data-lucide="message-circle" className="w-4 h-4 text-blue-400"></i> Discuss Your Strategy
                 </h3>
@@ -2458,10 +2458,10 @@ Rules:
       );
 
       const budgetImportModalEl = budgetImportOpen && (
-        <div className="no-print fixed inset-0 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4 z-[105]">
+        <div className="no-print fixed inset-0 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4 z-50">
           <div className="bg-slate-800 border border-slate-700 rounded-xl w-full max-w-3xl shadow-2xl flex flex-col" style={{ maxHeight: '88vh' }}>
             <div className="flex justify-between items-start border-b border-slate-700 px-5 py-4">
-              <div>
+              <div className="min-w-0">
                 <h3 className="text-sm font-bold text-slate-100 flex items-center gap-2">
                   <i data-lucide="file-spreadsheet" className="w-4 h-4 text-emerald-400"></i> Review Imported Expenses
                 </h3>
@@ -3755,15 +3755,15 @@ Rules:
 
             {/* DOCUMENT VIEWER MODAL */}
             {viewingDocument && (
-              <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4 z-50">
+              <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4 z-[70]">
                 <div className="bg-slate-800 border border-slate-700 rounded-xl p-5 max-w-3xl w-full space-y-3 shadow-2xl max-h-[90vh] flex flex-col">
-                  <div className="flex justify-between items-center border-b border-slate-700 pb-3">
-                    <h3 className="text-sm font-bold text-slate-100 font-mono">{viewingDocument.fileName}</h3>
-                    <div className="flex items-center gap-3">
-                      <a href={viewingDocument.dataUrl} download={viewingDocument.fileName} className="text-emerald-400 hover:text-emerald-300 text-xs flex items-center gap-1">
-                        <i data-lucide="download" className="w-4 h-4"></i> Download
+                  <div className="flex justify-between items-center gap-3 border-b border-slate-700 pb-3">
+                    <h3 className="text-sm font-bold text-slate-100 font-mono truncate min-w-0">{viewingDocument.fileName}</h3>
+                    <div className="flex items-center gap-3 shrink-0">
+                      <a href={viewingDocument.dataUrl} download={viewingDocument.fileName} className="text-emerald-400 hover:text-emerald-300 text-xs flex items-center gap-1 whitespace-nowrap">
+                        <i data-lucide="download" className="w-4 h-4"></i> <span className="hidden sm:inline">Download</span>
                       </a>
-                      <button onClick={() => setViewingDocument(null)} className="text-slate-400 hover:text-slate-200 text-xs">✕ Close</button>
+                      <button onClick={() => setViewingDocument(null)} className="text-slate-400 hover:text-slate-200 text-xs whitespace-nowrap">✕ Close</button>
                     </div>
                   </div>
                   <div className="flex-1 overflow-auto bg-slate-950 rounded-lg flex items-center justify-center min-h-[50vh]">
