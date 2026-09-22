@@ -58,6 +58,7 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+  <script src="https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js"></script>
 
   <!-- Lucide Icons (pinned — @latest can silently break this app on any upstream release) -->
   <script src="https://unpkg.com/lucide@1.47.0"></script>
@@ -195,6 +196,7 @@
     const DEFAULT_VISION_MODEL = 'qwen/qwen3.6-27b';
     const DEFAULT_STALE_DAYS = 60;
     const BACKUP_STALE_DAYS = 30;
+    const APP_VERSION = 'finvault-v14';
 
     // ============================================================
     // CLIENT-SIDE AUTO-CATEGORIZATION (used when no AI key is set)
@@ -311,6 +313,34 @@
       }
       return candidate;
     };
+
+    const nextAnnualOccurrence = (dueMonth, dueDay) => {
+      const m = parseInt(dueMonth, 10);
+      const d = parseInt(dueDay, 10);
+      if (!m || m < 1 || m > 12 || !d || d < 1 || d > 31) return null;
+      const now = new Date();
+      let candidate = new Date(now.getFullYear(), m - 1, d);
+      if (candidate < new Date(now.getFullYear(), now.getMonth(), now.getDate())) {
+        candidate = new Date(now.getFullYear() + 1, m - 1, d);
+      }
+      return candidate;
+    };
+
+    // Single entry point for "when is this expense next due" regardless of frequency
+    const nextExpenseOccurrence = (exp) => {
+      return (exp.frequency === 'annual')
+        ? nextAnnualOccurrence(exp.dueMonth, exp.dueDay)
+        : nextOccurrenceOfDay(exp.dueDay);
+    };
+
+    // What this expense costs per month on average — used for budget totals so an
+    // annual bill doesn't look like it costs the same as a monthly one.
+    const monthlyEquivalent = (exp) => {
+      const amt = parseFloat(exp.amount) || 0;
+      return exp.frequency === 'annual' ? amt / 12 : amt;
+    };
+
+    const MONTH_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
     const daysUntil = (date) => {
       if (!date) return null;
@@ -548,6 +578,34 @@ When you discuss a strategy, option, or "what if" scenario, give a balanced take
 Current financial snapshot and prior strategy report:
 ${JSON.stringify(contextPayload)}`;
 
+    const buildBudgetImportSystemPrompt = () => `You are a data-mapping assistant. You'll be given the column headers and a sample of rows from a spreadsheet a user uploaded, claiming it's their household budget or list of recurring bills. Map each row to a normalized expense record, no matter how the columns are labeled or ordered.
+
+Return ONLY a raw JSON object (no markdown fences, no commentary):
+{
+  "rows": [
+    {
+      "name": string,
+      "category": one of [${CATEGORIES.join(', ')}],
+      "amount": number,
+      "frequency": "monthly" | "annual",
+      "dueDay": number or null,
+      "dueMonth": number or null,
+      "skip": boolean
+    }
+  ]
+}
+
+Rules:
+- Produce exactly one output row per input row, in the same order, even ones you'll mark to skip.
+- "name" is the bill/expense name or description — whatever column reads like an item name.
+- "amount" is a plain positive number (strip currency symbols, commas). If a row has no usable amount, set "skip": true.
+- "frequency": default "monthly" unless the row's own data clearly indicates annual/yearly billing (a column saying so, or context like "car insurance premium" paired with a once-a-year framing). When genuinely unsure, use "monthly" — it's the more common case and easiest for the user to correct.
+- "dueDay" (1-31): pull from a date/due-day column if present, else null — do not guess a day that isn't indicated.
+- "dueMonth" (1-12): only set when frequency is "annual" and a month is indicated (from a date column or explicit month), else null.
+- "category": pick the closest match from the given list based on the name/description. Default to "Other" only if genuinely unclear.
+- Set "skip": true for rows that are clearly not actual expense line items — section headers, subtotal/total rows, blank rows, notes.
+- Output must be valid JSON and nothing else.`;
+
     const normalizeRecurringCharges = (list) => {
       if (!Array.isArray(list)) return [];
       return list
@@ -560,6 +618,58 @@ ${JSON.stringify(contextPayload)}`;
           dueDay: rc.dueDay || null,
           include: true
         }));
+    };
+
+    // Fallback header-matching for spreadsheet budget import when no Groq key is set.
+    // Fuzzy-matches common column header variants to the fields the app needs.
+    const HEADER_PATTERNS = {
+      name: /^(name|item|description|desc|bill|expense|payee|vendor|merchant)/i,
+      amount: /(amount|cost|price|total|\$|payment)/i,
+      category: /(category|type|group|class)/i,
+      frequency: /(frequency|recurrence|cadence|billing)/i,
+      dueDay: /(due.?day|day.?due|^day$)/i,
+      dueMonth: /(due.?month|month)/i,
+      dueDate: /(due.?date|^date$)/i
+    };
+
+    const detectColumn = (headers, pattern) => headers.find(h => pattern.test(String(h).trim()));
+
+    const heuristicMapBudgetRows = (rows) => {
+      if (!rows || rows.length === 0) return [];
+      const headers = Object.keys(rows[0]);
+      const nameCol = detectColumn(headers, HEADER_PATTERNS.name) || headers[0];
+      const amountCol = detectColumn(headers, HEADER_PATTERNS.amount);
+      const categoryCol = detectColumn(headers, HEADER_PATTERNS.category);
+      const freqCol = detectColumn(headers, HEADER_PATTERNS.frequency);
+      const dueDayCol = detectColumn(headers, HEADER_PATTERNS.dueDay);
+      const dueMonthCol = detectColumn(headers, HEADER_PATTERNS.dueMonth);
+      const dueDateCol = detectColumn(headers, HEADER_PATTERNS.dueDate);
+
+      return rows.map((row) => {
+        const rawName = nameCol ? String(row[nameCol] || '').trim() : '';
+        const rawAmount = amountCol ? String(row[amountCol] || '').replace(/[^0-9.\-]/g, '') : '';
+        const amount = parseFloat(rawAmount) || 0;
+        let frequency = 'monthly';
+        if (freqCol && /annual|year/i.test(String(row[freqCol] || ''))) frequency = 'annual';
+        let dueDay = dueDayCol ? parseInt(row[dueDayCol], 10) : null;
+        let dueMonth = dueMonthCol ? parseInt(row[dueMonthCol], 10) : null;
+        if ((!dueDay || !dueMonth) && dueDateCol && row[dueDateCol]) {
+          const d = new Date(row[dueDateCol]);
+          if (!isNaN(d.getTime())) {
+            dueDay = dueDay || d.getDate();
+            dueMonth = dueMonth || (d.getMonth() + 1);
+          }
+        }
+        return {
+          name: rawName,
+          category: (categoryCol && CATEGORIES.includes(String(row[categoryCol]).trim())) ? String(row[categoryCol]).trim() : autoCategorize(rawName),
+          amount,
+          frequency,
+          dueDay: dueDay || null,
+          dueMonth: frequency === 'annual' ? (dueMonth || null) : null,
+          skip: !rawName || !(amount > 0)
+        };
+      });
     };
 
     // SHA-256 (with a non-cryptographic fallback for insecure/older contexts where
@@ -604,6 +714,11 @@ ${JSON.stringify(contextPayload)}`;
       const [notes, setNotes] = useState('');
       const [parsing, setParsing] = useState(false);
       const [parseError, setParseError] = useState('');
+
+      const [budgetImportOpen, setBudgetImportOpen] = useState(false);
+      const [budgetImportRows, setBudgetImportRows] = useState([]);
+      const [budgetImportLoading, setBudgetImportLoading] = useState(false);
+      const [budgetImportError, setBudgetImportError] = useState('');
 
       const [lastBackupAt, setLastBackupAt] = useState(() => {
         try { return localStorage.getItem('last_backup_at') || ''; } catch (e) { return ''; }
@@ -703,10 +818,13 @@ ${JSON.stringify(contextPayload)}`;
         name: '',
         category: 'Housing/Mortgage',
         amount: '',
+        frequency: 'monthly',
         dueDay: '1',
+        dueMonth: '1',
         autoPay: true
       });
       const [editingExpenseId, setEditingExpenseId] = useState(null);
+      const EXPENSE_FORM_DEFAULT = { name: '', category: 'Housing/Mortgage', amount: '', frequency: 'monthly', dueDay: '1', dueMonth: '1', autoPay: true };
 
       const [contactForm, setContactForm] = useState({
         name: '', role: '', phone: '', email: '', notes: ''
@@ -833,7 +951,7 @@ ${JSON.stringify(contextPayload)}`;
         } catch (err) {
           console.warn('Icon render skipped (lucide error):', err);
         }
-      }, [records, expenses, documents, contacts, activeTab, parsing, pendingParsedData, isSettingsOpen, viewingDocument, expenseCategoryFilter, expenseSearchQuery, strategyReport, strategyLoading, installPromptEvent, isLocked, pinError, pinLockEnabled, showPinSetup, toasts, confirmModal, strategyChatOpen, strategyChatMessages, strategyChatLoading, goals, accountHistory, editingGoalId, helpOpen, helpCardIndex]);
+      }, [records, expenses, documents, contacts, activeTab, parsing, pendingParsedData, isSettingsOpen, viewingDocument, expenseCategoryFilter, expenseSearchQuery, strategyReport, strategyLoading, installPromptEvent, isLocked, pinError, pinLockEnabled, showPinSetup, toasts, confirmModal, strategyChatOpen, strategyChatMessages, strategyChatLoading, goals, accountHistory, editingGoalId, helpOpen, helpCardIndex, budgetImportOpen, budgetImportRows, budgetImportLoading]);
 
       const loadAllData = async () => {
         try {
@@ -944,12 +1062,14 @@ ${JSON.stringify(contextPayload)}`;
           name: expForm.name,
           category: expForm.category,
           amount: parseFloat(expForm.amount) || 0,
+          frequency: expForm.frequency === 'annual' ? 'annual' : 'monthly',
           dueDay: parseInt(expForm.dueDay, 10) || 1,
+          dueMonth: expForm.frequency === 'annual' ? (parseInt(expForm.dueMonth, 10) || 1) : null,
           autoPay: expForm.autoPay
         };
 
         await saveDBItem(STORES.EXPENSES, expRecord);
-        setExpForm({ name: '', category: 'Housing/Mortgage', amount: '', dueDay: '1', autoPay: true });
+        setExpForm(EXPENSE_FORM_DEFAULT);
         setEditingExpenseId(null);
         loadAllData();
       };
@@ -959,14 +1079,16 @@ ${JSON.stringify(contextPayload)}`;
           name: exp.name,
           category: exp.category,
           amount: exp.amount,
+          frequency: exp.frequency === 'annual' ? 'annual' : 'monthly',
           dueDay: String(exp.dueDay || 1),
+          dueMonth: String(exp.dueMonth || 1),
           autoPay: exp.autoPay
         });
         setEditingExpenseId(exp.id);
       };
 
       const handleCancelEditExpense = () => {
-        setExpForm({ name: '', category: 'Housing/Mortgage', amount: '', dueDay: '1', autoPay: true });
+        setExpForm(EXPENSE_FORM_DEFAULT);
         setEditingExpenseId(null);
       };
 
@@ -1093,7 +1215,7 @@ ${JSON.stringify(contextPayload)}`;
         await deleteDBItem(STORES.EXPENSES, id);
         if (editingExpenseId === id) {
           setEditingExpenseId(null);
-          setExpForm({ name: '', category: 'Housing/Mortgage', amount: '', dueDay: '1', autoPay: true });
+          setExpForm(EXPENSE_FORM_DEFAULT);
         }
         loadAllData();
       };
@@ -1596,13 +1718,121 @@ ${JSON.stringify(contextPayload)}`;
         setReplaceTargetAccountId(null);
       };
 
+      // ---------------- BUDGET SPREADSHEET IMPORT ----------------
+      const parseSpreadsheetToRows = (file) => {
+        const isCSV = file.type === 'text/csv' || file.name.endsWith('.csv');
+        if (isCSV) {
+          return new Promise((resolve, reject) => {
+            Papa.parse(file, {
+              header: true,
+              skipEmptyLines: true,
+              complete: (results) => resolve(results.data),
+              error: reject
+            });
+          });
+        }
+        // .xlsx / .xls via SheetJS
+        return file.arrayBuffer().then((buf) => {
+          const wb = XLSX.read(buf, { type: 'array' });
+          const firstSheet = wb.Sheets[wb.SheetNames[0]];
+          return XLSX.utils.sheet_to_json(firstSheet, { defval: '' });
+        });
+      };
+
+      const handleBudgetFileUpload = async (e) => {
+        const file = e.target.files[0];
+        if (!file) return;
+        setBudgetImportLoading(true);
+        setBudgetImportError('');
+
+        try {
+          const rows = await parseSpreadsheetToRows(file);
+          const cleanRows = rows.filter(r => Object.values(r).some(v => String(v).trim() !== ''));
+          if (cleanRows.length === 0) {
+            setBudgetImportError('No rows found in that file.');
+            setBudgetImportLoading(false);
+            e.target.value = '';
+            return;
+          }
+
+          let mapped = null;
+          if (groqApiKey) {
+            try {
+              const headers = Object.keys(cleanRows[0]);
+              const sample = cleanRows.slice(0, 200); // bound token usage on huge sheets
+              const result = await callGroq(groqApiKey, {
+                model: textModel,
+                temperature: 0.1,
+                response_format: { type: 'json_object' },
+                messages: [
+                  { role: 'system', content: buildBudgetImportSystemPrompt() },
+                  { role: 'user', content: JSON.stringify({ headers, rows: sample }) }
+                ]
+              });
+              if (result && Array.isArray(result.rows) && result.rows.length === sample.length) {
+                mapped = result.rows;
+              }
+            } catch (err) {
+              console.error('AI budget mapping failed, falling back to heuristic matching:', err);
+              setBudgetImportError('AI column mapping failed (' + err.message + ') — used basic header matching instead. Please double-check the rows below.');
+            }
+          }
+          if (!mapped) mapped = heuristicMapBudgetRows(cleanRows);
+
+          const reviewRows = mapped.map((r, i) => ({
+            uid: 'bi_' + Date.now() + '_' + i,
+            name: r.name || '',
+            category: CATEGORIES.includes(r.category) ? r.category : autoCategorize(r.name || ''),
+            amount: r.amount || 0,
+            frequency: r.frequency === 'annual' ? 'annual' : 'monthly',
+            dueDay: r.dueDay || '',
+            dueMonth: r.dueMonth || '',
+            include: !r.skip && !!r.name && parseFloat(r.amount) > 0
+          }));
+
+          setBudgetImportRows(reviewRows);
+          setBudgetImportOpen(true);
+        } catch (err) {
+          console.error('Failed to parse budget file:', err);
+          setBudgetImportError('Could not read that file: ' + err.message);
+        } finally {
+          setBudgetImportLoading(false);
+          e.target.value = '';
+        }
+      };
+
+      const handleConfirmBudgetImport = async () => {
+        const included = budgetImportRows.filter(r => r.include && r.name && parseFloat(r.amount) > 0);
+        for (let i = 0; i < included.length; i++) {
+          const r = included[i];
+          await saveDBItem(STORES.EXPENSES, {
+            id: 'exp_' + Date.now() + '_' + i,
+            name: r.name,
+            category: CATEGORIES.includes(r.category) ? r.category : 'Other',
+            amount: parseFloat(r.amount) || 0,
+            frequency: r.frequency === 'annual' ? 'annual' : 'monthly',
+            dueDay: parseInt(r.dueDay, 10) || 1,
+            dueMonth: r.frequency === 'annual' ? (parseInt(r.dueMonth, 10) || 1) : null,
+            autoPay: true
+          });
+        }
+        setBudgetImportOpen(false);
+        setBudgetImportRows([]);
+        loadAllData();
+        showToast('success', `Imported ${included.length} expense${included.length === 1 ? '' : 's'}.`);
+      };
+
+      const updateBudgetImportRow = (uid, patch) => {
+        setBudgetImportRows(prev => prev.map(r => r.uid === uid ? { ...r, ...patch } : r));
+      };
+
       // ---------------- DERIVED DATA ----------------
       const totalAssets = records.filter(r => r.category === 'Asset').reduce((acc, r) => acc + r.balance, 0)
         + records.reduce((acc, r) => acc + (parseFloat(r.linkedAssetValue) || 0), 0);
       const totalLiabilities = records.filter(r => r.category !== 'Asset').reduce((acc, r) => acc + r.balance, 0);
       const netWorth = totalAssets - totalLiabilities;
       const linkedAssetTotal = records.reduce((acc, r) => acc + (parseFloat(r.linkedAssetValue) || 0), 0);
-      const totalFixedExpenses = expenses.reduce((acc, e) => acc + e.amount, 0);
+      const totalFixedExpenses = expenses.reduce((acc, e) => acc + monthlyEquivalent(e), 0);
       const monthlyNetCashflow = monthlyIncome - totalFixedExpenses;
 
       const filteredExpenses = expenses.filter(exp => {
@@ -1621,7 +1851,7 @@ ${JSON.stringify(contextPayload)}`;
 
       const upcomingBills = expenses
         .map(exp => {
-          const nextDate = nextOccurrenceOfDay(exp.dueDay);
+          const nextDate = nextExpenseOccurrence(exp);
           return { ...exp, nextDate, daysUntil: daysUntil(nextDate) };
         })
         .filter(exp => exp.nextDate && exp.daysUntil <= 14)
@@ -1745,7 +1975,7 @@ ${JSON.stringify(contextPayload)}`;
         doc.line(14, y, 196, y);
         y += 8;
 
-        const totalFixedExpensesPdf = expenses.reduce((a, b) => a + b.amount, 0);
+        const totalFixedExpensesPdf = expenses.reduce((a, b) => a + monthlyEquivalent(b), 0);
 
         doc.setFontSize(11);
         doc.text(`Total Liquid & Fixed Assets: $${totalAssetsPdf.toLocaleString('en-US', { minimumFractionDigits: 2 })}`, 14, y);
@@ -1765,7 +1995,8 @@ ${JSON.stringify(contextPayload)}`;
           doc.setFontSize(9);
           upcomingBills.forEach(b => {
             if (y > 275) { doc.addPage(); y = 20; }
-            doc.text(`${b.name} — $${b.amount.toLocaleString('en-US', { minimumFractionDigits: 2 })} — due in ${b.daysUntil} day(s) (day ${b.dueDay})`, 14, y);
+            const dueLabel = b.frequency === 'annual' ? `${MONTH_NAMES[(b.dueMonth || 1) - 1]} ${b.dueDay}` : `day ${b.dueDay}`;
+            doc.text(`${b.name} — $${b.amount.toLocaleString('en-US', { minimumFractionDigits: 2 })} — due in ${b.daysUntil} day(s) (${dueLabel})`, 14, y);
             y += 5;
           });
         }
@@ -1793,7 +2024,7 @@ ${JSON.stringify(contextPayload)}`;
         })),
         monthlyExpensesByCategory: CATEGORIES.map(c => ({
           category: c,
-          total: expenses.filter(e => e.category === c).reduce((a, e) => a + e.amount, 0)
+          total: expenses.filter(e => e.category === c).reduce((a, e) => a + monthlyEquivalent(e), 0)
         })).filter(c => c.total > 0),
         netWorthHistory: networthHistory.slice(-12).map(h => ({ date: h.date, netWorth: h.netWorth }))
       });
@@ -2226,6 +2457,107 @@ ${JSON.stringify(contextPayload)}`;
         </div>
       );
 
+      const budgetImportModalEl = budgetImportOpen && (
+        <div className="no-print fixed inset-0 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4 z-[105]">
+          <div className="bg-slate-800 border border-slate-700 rounded-xl w-full max-w-3xl shadow-2xl flex flex-col" style={{ maxHeight: '88vh' }}>
+            <div className="flex justify-between items-start border-b border-slate-700 px-5 py-4">
+              <div>
+                <h3 className="text-sm font-bold text-slate-100 flex items-center gap-2">
+                  <i data-lucide="file-spreadsheet" className="w-4 h-4 text-emerald-400"></i> Review Imported Expenses
+                </h3>
+                <p className="text-[10px] text-slate-500 mt-0.5">
+                  {budgetImportRows.filter(r => r.include).length} of {budgetImportRows.length} rows checked. Fix anything that looks off before importing.
+                </p>
+              </div>
+              <button onClick={() => { setBudgetImportOpen(false); setBudgetImportRows([]); }} className="text-slate-400 hover:text-slate-200 text-xs shrink-0">✕ Close</button>
+            </div>
+
+            <div className="flex-1 overflow-y-auto px-4 py-3 space-y-2">
+              {budgetImportRows.map((r) => (
+                <div key={r.uid} className={`border rounded-lg p-2.5 space-y-2 transition ${r.include ? 'border-slate-700 bg-slate-900/40' : 'border-slate-800 bg-slate-900/10 opacity-50'}`}>
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="checkbox"
+                      checked={r.include}
+                      onChange={(e) => updateBudgetImportRow(r.uid, { include: e.target.checked })}
+                      className="rounded bg-slate-900 border-slate-700 text-emerald-500 shrink-0"
+                    />
+                    <input
+                      type="text"
+                      value={r.name}
+                      onChange={(e) => updateBudgetImportRow(r.uid, { name: e.target.value })}
+                      placeholder="Expense name"
+                      className="flex-1 min-w-0 bg-transparent text-xs text-slate-100 focus:outline-none border-b border-transparent focus:border-slate-600"
+                    />
+                  </div>
+                  <div className="flex flex-wrap items-center gap-1.5 pl-6">
+                    <select
+                      value={r.category}
+                      onChange={(e) => updateBudgetImportRow(r.uid, { category: e.target.value })}
+                      className="bg-slate-800 border border-slate-700 rounded px-1.5 py-1 text-[10px] text-slate-300"
+                    >
+                      {CATEGORIES.map(c => <option key={c}>{c}</option>)}
+                    </select>
+                    <input
+                      type="number"
+                      step="0.01"
+                      value={r.amount}
+                      onChange={(e) => updateBudgetImportRow(r.uid, { amount: e.target.value })}
+                      className="w-24 bg-slate-800 border border-slate-700 rounded px-1.5 py-1 text-[10px] text-amber-400 font-bold"
+                    />
+                    <select
+                      value={r.frequency}
+                      onChange={(e) => updateBudgetImportRow(r.uid, { frequency: e.target.value })}
+                      className="bg-slate-800 border border-slate-700 rounded px-1.5 py-1 text-[10px] text-slate-300"
+                    >
+                      <option value="monthly">Monthly</option>
+                      <option value="annual">Annual</option>
+                    </select>
+                    {r.frequency === 'annual' && (
+                      <select
+                        value={r.dueMonth}
+                        onChange={(e) => updateBudgetImportRow(r.uid, { dueMonth: e.target.value })}
+                        className="bg-slate-800 border border-slate-700 rounded px-1.5 py-1 text-[10px] text-slate-300"
+                      >
+                        <option value="">Month</option>
+                        {MONTH_NAMES.map((m, i) => <option key={m} value={i + 1}>{m}</option>)}
+                      </select>
+                    )}
+                    <input
+                      type="number"
+                      min="1"
+                      max="31"
+                      placeholder="Due day"
+                      value={r.dueDay}
+                      onChange={(e) => updateBudgetImportRow(r.uid, { dueDay: e.target.value })}
+                      className="w-16 bg-slate-800 border border-slate-700 rounded px-1.5 py-1 text-[10px] text-slate-300"
+                    />
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            <div className="flex gap-2 border-t border-slate-700 p-4">
+              <button
+                type="button"
+                onClick={() => { setBudgetImportOpen(false); setBudgetImportRows([]); }}
+                className="px-4 py-2 rounded-lg text-xs bg-slate-700 hover:bg-slate-600 text-slate-200"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirmBudgetImport}
+                disabled={budgetImportRows.filter(r => r.include).length === 0}
+                className="flex-1 px-4 py-2 rounded-lg text-xs font-medium text-white shadow-md bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                Import {budgetImportRows.filter(r => r.include).length} Checked
+              </button>
+            </div>
+          </div>
+        </div>
+      );
+
       if (isLocked) {
         return (
           <React.Fragment>
@@ -2273,6 +2605,7 @@ ${JSON.stringify(contextPayload)}`;
           {confirmModalEl}
           {strategyChatModalEl}
           {helpModalEl}
+          {budgetImportModalEl}
           <div className="max-w-6xl mx-auto space-y-6">
 
             {/* HEADER */}
@@ -2557,6 +2890,21 @@ ${JSON.stringify(contextPayload)}`;
                     <p className="text-[10px] text-slate-400">Baseline net take-home pay for calculating surplus liquidity.</p>
                   </div>
 
+                  <div className="bg-slate-800 p-5 rounded-xl border border-slate-700 space-y-3">
+                    <h2 className="text-sm font-semibold uppercase tracking-wider text-slate-300 flex items-center gap-2">
+                      <i data-lucide="file-spreadsheet" className="w-4 h-4 text-emerald-400"></i> Import Budget Spreadsheet
+                    </h2>
+                    <div className="border-2 border-dashed border-slate-600 rounded-lg p-4 text-center hover:border-emerald-500 transition cursor-pointer relative bg-slate-800/50">
+                      <input type="file" accept=".xlsx,.xls,.csv" onChange={handleBudgetFileUpload} className="absolute inset-0 w-full h-full opacity-0 cursor-pointer" />
+                      <i data-lucide="upload" className="w-6 h-6 mx-auto text-slate-400 mb-1.5"></i>
+                      <p className="text-xs text-slate-300 font-medium">{budgetImportLoading ? 'Reading & mapping columns...' : 'Drop an Excel or CSV budget'}</p>
+                      <p className="text-[10px] text-slate-500 mt-1">{groqApiKey ? `AI column mapping via Groq (${textModel})` : 'No AI key set — using header-name matching'}</p>
+                    </div>
+                    {budgetImportError && (
+                      <p className="text-[10px] text-amber-400">{budgetImportError}</p>
+                    )}
+                  </div>
+
                   <form onSubmit={handleAddExpense} className="bg-slate-800 p-5 rounded-xl border border-slate-700 space-y-3">
                     <h2 className="text-sm font-semibold uppercase tracking-wider text-slate-300 flex items-center gap-2">
                       <i data-lucide={editingExpenseId ? 'pencil' : 'plus'} className="w-4 h-4 text-emerald-400"></i> {editingExpenseId ? 'Edit Expense' : 'Add Recurring Expense'}
@@ -2586,15 +2934,32 @@ ${JSON.stringify(contextPayload)}`;
                       </div>
                     </div>
 
-                    <div className="flex items-center justify-between pt-1">
-                      <div className="w-1/2">
-                        <label className="text-[10px] text-slate-400 block mb-1">Due Day of Month</label>
+                    <div>
+                      <label className="text-[10px] text-slate-400 block mb-1">Frequency</label>
+                      <div className="flex gap-2">
+                        <button type="button" onClick={() => setExpForm({ ...expForm, frequency: 'monthly' })} className={`flex-1 py-1.5 rounded-lg text-xs font-medium border transition ${expForm.frequency !== 'annual' ? 'bg-emerald-600 border-emerald-600 text-white' : 'bg-slate-900 border-slate-700 text-slate-400'}`}>Monthly</button>
+                        <button type="button" onClick={() => setExpForm({ ...expForm, frequency: 'annual' })} className={`flex-1 py-1.5 rounded-lg text-xs font-medium border transition ${expForm.frequency === 'annual' ? 'bg-emerald-600 border-emerald-600 text-white' : 'bg-slate-900 border-slate-700 text-slate-400'}`}>Annual</button>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center justify-between gap-2 pt-1">
+                      {expForm.frequency === 'annual' && (
+                        <div className="flex-1">
+                          <label className="text-[10px] text-slate-400 block mb-1">Due Month</label>
+                          <select value={expForm.dueMonth} onChange={(e) => setExpForm({ ...expForm, dueMonth: e.target.value })} className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-100">
+                            {MONTH_NAMES.map((m, i) => <option key={m} value={i + 1}>{m}</option>)}
+                          </select>
+                        </div>
+                      )}
+                      <div className="flex-1">
+                        <label className="text-[10px] text-slate-400 block mb-1">Due Day{expForm.frequency === 'annual' ? '' : ' of Month'}</label>
                         <input type="number" min="1" max="31" placeholder="1-31" value={expForm.dueDay} onChange={(e) => setExpForm({ ...expForm, dueDay: e.target.value })} className="bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-100 w-full" />
                       </div>
-                      <label className="text-xs text-slate-300 flex items-center gap-2 cursor-pointer">
-                        <input type="checkbox" checked={expForm.autoPay} onChange={(e) => setExpForm({ ...expForm, autoPay: e.target.checked })} className="rounded bg-slate-900 border-slate-700 text-emerald-500" /> AutoPay
-                      </label>
                     </div>
+
+                    <label className="text-xs text-slate-300 flex items-center gap-2 cursor-pointer">
+                      <input type="checkbox" checked={expForm.autoPay} onChange={(e) => setExpForm({ ...expForm, autoPay: e.target.checked })} className="rounded bg-slate-900 border-slate-700 text-emerald-500" /> AutoPay
+                    </label>
 
                     <div className="flex gap-2">
                       <button type="submit" className="flex-1 bg-slate-700 hover:bg-slate-600 text-slate-100 font-medium py-2 rounded-lg text-xs transition">{editingExpenseId ? 'Save Changes' : 'Add Expense'}</button>
@@ -2661,7 +3026,7 @@ ${JSON.stringify(contextPayload)}`;
                         <table className="w-full text-left text-xs">
                           <thead>
                             <tr className="border-b border-slate-700 text-slate-400 uppercase">
-                              <th className="pb-2">Name</th><th className="pb-2">Category</th><th className="pb-2">Due Day</th><th className="pb-2">AutoPay</th><th className="pb-2">Amount</th><th className="pb-2 text-right">Action</th>
+                              <th className="pb-2">Name</th><th className="pb-2">Category</th><th className="pb-2">Due</th><th className="pb-2">AutoPay</th><th className="pb-2">Amount</th><th className="pb-2 text-right">Action</th>
                             </tr>
                           </thead>
                           <tbody className="divide-y divide-slate-700/50">
@@ -2669,9 +3034,14 @@ ${JSON.stringify(contextPayload)}`;
                               <tr key={exp.id} className="hover:bg-slate-700/30">
                                 <td className="py-2.5 font-medium text-slate-200">{exp.name}</td>
                                 <td className="py-2.5"><span className="bg-slate-700/80 px-2 py-0.5 rounded text-[10px] text-slate-300">{exp.category}</span></td>
-                                <td className="py-2.5 text-slate-400">{exp.dueDay ? `Day ${exp.dueDay}` : '—'}</td>
+                                <td className="py-2.5 text-slate-400">
+                                  {exp.dueDay ? (exp.frequency === 'annual' ? `${MONTH_NAMES[(exp.dueMonth || 1) - 1]} ${exp.dueDay}` : `Day ${exp.dueDay}`) : '—'}
+                                </td>
                                 <td className="py-2.5">{exp.autoPay ? <span className="text-emerald-400 font-semibold">Active</span> : <span className="text-slate-500">Manual</span>}</td>
-                                <td className="py-2.5 font-bold text-amber-400">${exp.amount.toLocaleString('en-US', { minimumFractionDigits: 2 })}</td>
+                                <td className="py-2.5 font-bold text-amber-400">
+                                  ${exp.amount.toLocaleString('en-US', { minimumFractionDigits: 2 })}
+                                  <span className="text-[10px] text-slate-500 font-normal">/{exp.frequency === 'annual' ? 'yr' : 'mo'}</span>
+                                </td>
                                 <td className="py-2.5 text-right whitespace-nowrap">
                                   <button onClick={() => handleEditExpenseClick(exp)} title="Edit" className="text-slate-500 hover:text-amber-400 mr-2"><i data-lucide="pencil" className="w-4 h-4 inline"></i></button>
                                   <button onClick={() => handleDeleteExpense(exp.id)} title="Delete" className="text-slate-500 hover:text-rose-400"><i data-lucide="trash-2" className="w-4 h-4 inline"></i></button>
@@ -3125,6 +3495,8 @@ ${JSON.stringify(contextPayload)}`;
               </div>
             )}
 
+            <p className="no-print text-center text-[10px] text-slate-700 font-mono pt-2">Financial Vault · Build {APP_VERSION}</p>
+
             {/* PARSED / EDIT ACCOUNT MODAL */}
             {pendingParsedData && (
               <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4 z-50">
@@ -3417,6 +3789,7 @@ ${JSON.stringify(contextPayload)}`;
                     </h3>
                     <button onClick={() => setIsSettingsOpen(false)} className="text-slate-400 hover:text-slate-200 text-xs">✕ Close</button>
                   </div>
+                  <p className="text-[10px] text-slate-600 font-mono -mt-3">Build {APP_VERSION}</p>
 
                   <div className="space-y-4">
 
