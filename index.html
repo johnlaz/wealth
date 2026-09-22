@@ -196,7 +196,7 @@
     const DEFAULT_VISION_MODEL = 'qwen/qwen3.6-27b';
     const DEFAULT_STALE_DAYS = 60;
     const BACKUP_STALE_DAYS = 30;
-    const APP_VERSION = 'finvault-v15';
+    const APP_VERSION = 'finvault-v16';
 
     // ============================================================
     // CLIENT-SIDE AUTO-CATEGORIZATION (used when no AI key is set)
@@ -2662,7 +2662,7 @@ Rules:
             </header>
 
             {/* hidden input used for "Replace Document" actions from the ledger table */}
-            <input type="file" accept=".pdf,.csv,image/*" ref={replaceInputRef} onChange={handleReplaceFileSelected} className="hidden no-print" />
+            <input type="file" accept=".pdf,.csv,image/*,application/pdf,text/csv,application/csv" ref={replaceInputRef} onChange={handleReplaceFileSelected} className="hidden no-print" />
 
             {/* TAB NAVIGATION */}
             <div className="no-print flex border-b border-slate-700 gap-4 text-sm font-medium overflow-x-auto">
@@ -2784,7 +2784,7 @@ Rules:
                       <i data-lucide="upload" className="w-4 h-4 text-emerald-400"></i> Ingest Statement (PDF / CSV / Image)
                     </h2>
                     <div className="border-2 border-dashed border-slate-600 rounded-lg p-6 text-center hover:border-emerald-500 transition cursor-pointer relative bg-slate-800/50">
-                      <input type="file" accept=".pdf,.csv,image/*" onChange={(e) => handleFileUpload(e)} className="absolute inset-0 w-full h-full opacity-0 cursor-pointer" />
+                      <input type="file" accept=".pdf,.csv,image/*,application/pdf,text/csv,application/csv" onChange={(e) => handleFileUpload(e)} className="absolute inset-0 w-full h-full opacity-0 cursor-pointer" />
                       <i data-lucide="file-text" className="w-8 h-8 mx-auto text-slate-400 mb-2"></i>
                       <p className="text-xs text-slate-300 font-medium">{parsing ? 'Extracting & analyzing...' : 'Drop a statement PDF, CSV, or photo'}</p>
                       <p className="text-[10px] text-slate-500 mt-1">{groqApiKey ? `AI parsing via Groq (${textModel})` : 'No AI key set — using offline rule-based parsing'}</p>
@@ -2895,7 +2895,7 @@ Rules:
                       <i data-lucide="file-spreadsheet" className="w-4 h-4 text-emerald-400"></i> Import Budget Spreadsheet
                     </h2>
                     <div className="border-2 border-dashed border-slate-600 rounded-lg p-4 text-center hover:border-emerald-500 transition cursor-pointer relative bg-slate-800/50">
-                      <input type="file" accept=".xlsx,.xls,.csv" onChange={handleBudgetFileUpload} className="absolute inset-0 w-full h-full opacity-0 cursor-pointer" />
+                      <input type="file" accept=".xlsx,.xls,.csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel,text/csv,application/csv,text/comma-separated-values" onChange={handleBudgetFileUpload} className="absolute inset-0 w-full h-full opacity-0 cursor-pointer" />
                       <i data-lucide="upload" className="w-6 h-6 mx-auto text-slate-400 mb-1.5"></i>
                       <p className="text-xs text-slate-300 font-medium">{budgetImportLoading ? 'Reading & mapping columns...' : 'Drop an Excel or CSV budget'}</p>
                       <p className="text-[10px] text-slate-500 mt-1">{groqApiKey ? `AI column mapping via Groq (${textModel})` : 'No AI key set — using header-name matching'}</p>
