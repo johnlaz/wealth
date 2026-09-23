@@ -196,7 +196,7 @@
     const DEFAULT_VISION_MODEL = 'qwen/qwen3.6-27b';
     const DEFAULT_STALE_DAYS = 60;
     const BACKUP_STALE_DAYS = 30;
-    const APP_VERSION = 'finvault-v20';
+    const APP_VERSION = 'finvault-v21';
 
     // ============================================================
     // CLIENT-SIDE AUTO-CATEGORIZATION (used when no AI key is set)
@@ -475,11 +475,25 @@ Rules:
     // Raw conversational text — no JSON parsing — for the advisor chat
     const callGroqText = async (apiKey, body) => callGroqCompletion(apiKey, body);
 
+    // A short, situation-specific hint appended to Groq error messages shown in the UI —
+    // rate limits and missing/inaccessible models need different fixes, so don't conflate them.
+    const groqErrorHint = (err) => {
+      const msg = String(err && err.message || '');
+      if (/429|rate_limit/i.test(msg)) {
+        return ' This model\'s rate limit on your account is quite low — wait a minute and try again, or go to Settings and use "Fetch Models" to switch to one with more headroom.';
+      }
+      if (/404|model_not_found|does not exist/i.test(msg)) {
+        return ' If this says a model doesn\'t exist or isn\'t accessible, go to Settings and use "Fetch Models" to pick one your key can actually use.';
+      }
+      return '';
+    };
+
     const extractWithGroqText = async (fullText, apiKey, model) => {
       const truncated = fullText.slice(0, 14000);
       return callGroq(apiKey, {
         model: model || DEFAULT_TEXT_MODEL,
         temperature: 0.1,
+        max_tokens: 700, // the extraction JSON is compact — keep the request well under low-tier OTPM limits
         response_format: { type: 'json_object' },
         messages: [
           { role: 'system', content: buildExtractionSystemPrompt() },
@@ -492,6 +506,7 @@ Rules:
       return callGroq(apiKey, {
         model: model || DEFAULT_VISION_MODEL,
         temperature: 0.1,
+        max_tokens: 700,
         response_format: { type: 'json_object' },
         messages: [
           { role: 'system', content: buildExtractionSystemPrompt() },
@@ -1646,7 +1661,7 @@ Rules:
                 extracted = await extractWithGroqText(fullText, groqApiKey, textModel);
               } catch (err) {
                 console.error('Groq extraction failed, falling back to regex:', err);
-                setParseError('AI parsing failed (' + err.message + '). Falling back to basic extraction — please double-check the fields below. If this says a model doesn\'t exist or isn\'t accessible, go to Settings and use "Fetch Models" to pick one your key can actually use.');
+                setParseError('AI parsing failed (' + err.message + '). Falling back to basic extraction — please double-check the fields below.' + groqErrorHint(err));
               }
             }
             if (!extracted) extracted = regexExtractFromText(fullText);
@@ -1680,7 +1695,7 @@ Rules:
                 extracted = await extractWithGroqVision(dataUrl, groqApiKey, visionModel);
               } catch (err) {
                 console.error('Groq vision extraction failed:', err);
-                setParseError('AI image parsing failed (' + err.message + '). Enter the details manually below — the image is still saved as a document. If this says a model doesn\'t exist or isn\'t accessible, go to Settings and use "Fetch Models" to pick one your key can actually use.');
+                setParseError('AI image parsing failed (' + err.message + '). Enter the details manually below — the image is still saved as a document.' + groqErrorHint(err));
               }
             } else {
               setParseError('No Groq API key set, so this image could not be auto-read. Add a key in Settings, or enter the details manually below — the image is still saved as a document.');
@@ -1787,14 +1802,18 @@ Rules:
             return;
           }
 
-          let mapped = null;
+          // Heuristic mapping covers every row as a baseline — AI mapping (when available)
+          // then improves as many of those rows as fit in one reasonably-sized request.
+          let mapped = heuristicMapBudgetRows(cleanRows);
           if (groqApiKey) {
             try {
               const headers = Object.keys(cleanRows[0]);
-              const sample = cleanRows.slice(0, 200); // bound token usage on huge sheets
+              const sampleSize = Math.min(cleanRows.length, 60); // keeps the request well under strict per-minute output limits
+              const sample = cleanRows.slice(0, sampleSize);
               const result = await callGroq(groqApiKey, {
                 model: textModel,
                 temperature: 0.1,
+                max_tokens: Math.min(3500, 150 + sampleSize * 35),
                 response_format: { type: 'json_object' },
                 messages: [
                   { role: 'system', content: buildBudgetImportSystemPrompt() },
@@ -1802,14 +1821,16 @@ Rules:
                 ]
               });
               if (result && Array.isArray(result.rows) && result.rows.length === sample.length) {
-                mapped = result.rows;
+                mapped = [...result.rows, ...mapped.slice(sampleSize)];
+                if (cleanRows.length > sampleSize) {
+                  setBudgetImportError(`AI mapped the first ${sampleSize} rows; the remaining ${cleanRows.length - sampleSize} used basic header matching instead — please double-check those.`);
+                }
               }
             } catch (err) {
               console.error('AI budget mapping failed, falling back to heuristic matching:', err);
-              setBudgetImportError('AI column mapping failed (' + err.message + ') — used basic header matching instead. Please double-check the rows below.');
+              setBudgetImportError('AI column mapping failed (' + err.message + ') — used basic header matching instead. Please double-check the rows below.' + groqErrorHint(err));
             }
           }
-          if (!mapped) mapped = heuristicMapBudgetRows(cleanRows);
 
           const reviewRows = mapped.map((r, i) => ({
             uid: 'bi_' + Date.now() + '_' + i,
@@ -2074,6 +2095,7 @@ Rules:
           const result = await callGroq(groqApiKey, {
             model: textModel,
             temperature: 0.3,
+            max_tokens: 1800, // headline + strengths + risks + several strategies + cashflow notes
             response_format: { type: 'json_object' },
             messages: [
               { role: 'system', content: buildWealthStrategySystemPrompt() },
@@ -2088,7 +2110,7 @@ Rules:
           localStorage.setItem('wealth_strategy_report', JSON.stringify(report));
         } catch (err) {
           console.error('Wealth strategy generation failed:', err);
-          setStrategyError('Report generation failed: ' + err.message + ' — if this says a model doesn\'t exist or isn\'t accessible, go to Settings and use "Fetch Models" to pick one your key can actually use.');
+          setStrategyError('Report generation failed: ' + err.message + '.' + groqErrorHint(err));
         } finally {
           setStrategyLoading(false);
         }
@@ -2115,6 +2137,7 @@ Rules:
           const replyText = await callGroqText(groqApiKey, {
             model: textModel,
             temperature: 0.4,
+            max_tokens: 900, // a focused conversational reply, not another full report
             messages: [
               { role: 'system', content: buildAdvisorChatSystemPrompt(contextPayload) },
               ...updatedMessages
@@ -2123,7 +2146,7 @@ Rules:
           setStrategyChatMessages(prev => [...prev, { role: 'assistant', content: replyText || "I didn't get a usable response — try asking again." }]);
         } catch (err) {
           console.error('Advisor chat failed:', err);
-          setStrategyChatMessages(prev => [...prev, { role: 'assistant', content: `Something went wrong reaching Groq: ${err.message}` }]);
+          setStrategyChatMessages(prev => [...prev, { role: 'assistant', content: `Something went wrong reaching Groq: ${err.message}${groqErrorHint(err)}` }]);
         } finally {
           setStrategyChatLoading(false);
         }
