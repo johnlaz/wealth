@@ -196,7 +196,7 @@
     const DEFAULT_VISION_MODEL = 'qwen/qwen3.6-27b';
     const DEFAULT_STALE_DAYS = 60;
     const BACKUP_STALE_DAYS = 30;
-    const APP_VERSION = 'finvault-v18';
+    const APP_VERSION = 'finvault-v20';
 
     // ============================================================
     // CLIENT-SIDE AUTO-CATEGORIZATION (used when no AI key is set)
@@ -815,6 +815,7 @@ Rules:
       const [pendingParsedData, setPendingParsedData] = useState(null);
       const [isSettingsOpen, setIsSettingsOpen] = useState(false);
       const [viewingDocument, setViewingDocument] = useState(null);
+      const [viewingAccount, setViewingAccount] = useState(null);
       const [helpOpen, setHelpOpen] = useState(false);
       const [helpCardIndex, setHelpCardIndex] = useState(0);
       const helpAutoShownRef = useRef(false);
@@ -967,7 +968,7 @@ Rules:
         } catch (err) {
           console.warn('Icon render skipped (lucide error):', err);
         }
-      }, [records, expenses, documents, contacts, activeTab, parsing, pendingParsedData, isSettingsOpen, viewingDocument, expenseCategoryFilter, expenseSearchQuery, strategyReport, strategyLoading, installPromptEvent, isLocked, pinError, pinLockEnabled, showPinSetup, toasts, confirmModal, strategyChatOpen, strategyChatMessages, strategyChatLoading, goals, accountHistory, editingGoalId, helpOpen, helpCardIndex, budgetImportOpen, budgetImportRows, budgetImportLoading]);
+      }, [records, expenses, documents, contacts, activeTab, parsing, pendingParsedData, isSettingsOpen, viewingDocument, expenseCategoryFilter, expenseSearchQuery, strategyReport, strategyLoading, installPromptEvent, isLocked, pinError, pinLockEnabled, showPinSetup, toasts, confirmModal, strategyChatOpen, strategyChatMessages, strategyChatLoading, goals, accountHistory, editingGoalId, helpOpen, helpCardIndex, budgetImportOpen, budgetImportRows, budgetImportLoading, viewingAccount]);
 
       const loadAllData = async () => {
         try {
@@ -1130,7 +1131,8 @@ Rules:
           notes: rec.notes || '',
           recurringCharges: [],
           linkedAssetLabel: rec.linkedAssetLabel || '',
-          linkedAssetValue: rec.linkedAssetValue || ''
+          linkedAssetValue: rec.linkedAssetValue || '',
+          loginUrl: rec.loginUrl || ''
         });
       };
 
@@ -1152,6 +1154,7 @@ Rules:
           documentId: pendingParsedData.documentId || null,
           linkedAssetLabel: pendingParsedData.category === 'Liability' ? (pendingParsedData.linkedAssetLabel || '') : '',
           linkedAssetValue: pendingParsedData.category === 'Liability' ? (parseFloat(pendingParsedData.linkedAssetValue) || 0) : 0,
+          loginUrl: (pendingParsedData.loginUrl || '').trim(),
           updatedAt: new Date().toISOString()
         };
 
@@ -1619,7 +1622,8 @@ Rules:
                   notes: existingAccountId ? (records.find(r => r.id === existingAccountId) || {}).notes || '' : '',
                   recurringCharges: [],
                   linkedAssetLabel: existingAccountId ? (records.find(r => r.id === existingAccountId) || {}).linkedAssetLabel || '' : '',
-                  linkedAssetValue: existingAccountId ? (records.find(r => r.id === existingAccountId) || {}).linkedAssetValue || '' : ''
+                  linkedAssetValue: existingAccountId ? (records.find(r => r.id === existingAccountId) || {}).linkedAssetValue || '' : '',
+                  loginUrl: existingAccountId ? (records.find(r => r.id === existingAccountId) || {}).loginUrl || '' : ''
                 });
                 setParsing(false);
               }
@@ -1664,7 +1668,8 @@ Rules:
               notes: existingAccountId ? (records.find(r => r.id === existingAccountId) || {}).notes || '' : '',
               recurringCharges: normalizeRecurringCharges(extracted.recurringCharges),
               linkedAssetLabel: extracted.linkedAssetLabel || (existingAccountId ? (records.find(r => r.id === existingAccountId) || {}).linkedAssetLabel || '' : ''),
-              linkedAssetValue: extracted.linkedAssetValue || (existingAccountId ? (records.find(r => r.id === existingAccountId) || {}).linkedAssetValue || '' : '')
+              linkedAssetValue: extracted.linkedAssetValue || (existingAccountId ? (records.find(r => r.id === existingAccountId) || {}).linkedAssetValue || '' : ''),
+              loginUrl: existingAccountId ? (records.find(r => r.id === existingAccountId) || {}).loginUrl || '' : ''
             });
             setParsing(false);
           } else if (isImage) {
@@ -1710,7 +1715,8 @@ Rules:
               notes: existingAccountId ? (records.find(r => r.id === existingAccountId) || {}).notes || '' : '',
               recurringCharges: normalizeRecurringCharges(extracted.recurringCharges),
               linkedAssetLabel: extracted.linkedAssetLabel || (existingAccountId ? (records.find(r => r.id === existingAccountId) || {}).linkedAssetLabel || '' : ''),
-              linkedAssetValue: extracted.linkedAssetValue || (existingAccountId ? (records.find(r => r.id === existingAccountId) || {}).linkedAssetValue || '' : '')
+              linkedAssetValue: extracted.linkedAssetValue || (existingAccountId ? (records.find(r => r.id === existingAccountId) || {}).linkedAssetValue || '' : ''),
+              loginUrl: existingAccountId ? (records.find(r => r.id === existingAccountId) || {}).loginUrl || '' : ''
             });
             setParsing(false);
           } else if (isSpreadsheet) {
@@ -2267,7 +2273,10 @@ Rules:
         const values = points.map(p => p.balance);
         const min = Math.min(...values);
         const max = Math.max(...values);
-        const range = (max - min) || 1;
+        // A flat line (no real balance movement yet) conveys nothing and just
+        // looks like a stray design artifact — skip it until there's an actual trend.
+        if (max === min) return null;
+        const range = max - min;
         const w = 60, h = 18;
         const pts = points.map((p, i) => {
           const x = (i / (points.length - 1)) * w;
@@ -2278,6 +2287,7 @@ Rules:
         const improved = desirableDirection === 'down' ? delta <= 0 : delta >= 0;
         return (
           <svg viewBox={`0 0 ${w} ${h}`} className="w-14 h-4 inline-block align-middle ml-2" preserveAspectRatio="none">
+            <title>Balance trend over the last {points.length} recorded day{points.length === 1 ? '' : 's'}: {improved ? 'improving' : 'worsening'}</title>
             <polyline points={pts} fill="none" stroke={improved ? '#34d399' : '#fb7185'} strokeWidth="1.5" vectorEffect="non-scaling-stroke" />
           </svg>
         );
@@ -2362,6 +2372,91 @@ Rules:
           </div>
         </div>
       );
+
+      const viewingAccountModalEl = viewingAccount && (() => {
+        const linkedDoc = getDocumentForAccount(viewingAccount.id);
+        const linkedVal = parseFloat(viewingAccount.linkedAssetValue) || 0;
+        const history = accountHistory.filter(h => h.accountId === viewingAccount.id).map(h => ({ date: h.date, value: h.balance }));
+        return (
+          <div className="no-print fixed inset-0 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4 z-50">
+            <div className="bg-slate-800 border border-slate-700 rounded-xl w-full max-w-lg shadow-2xl flex flex-col" style={{ maxHeight: '88vh' }}>
+              <div className="flex justify-between items-start border-b border-slate-700 px-5 py-4">
+                <div className="min-w-0">
+                  <h3 className="text-sm font-bold text-slate-100 truncate">{viewingAccount.institution}</h3>
+                  <p className="text-[11px] text-slate-500 mt-0.5">{viewingAccount.accountType} · {viewingAccount.category} {viewingAccount.accountNumberMasked ? `· ${viewingAccount.accountNumberMasked}` : ''}</p>
+                </div>
+                <button onClick={() => setViewingAccount(null)} className="text-slate-400 hover:text-slate-200 text-xs shrink-0">✕ Close</button>
+              </div>
+
+              <div className="flex-1 overflow-y-auto px-5 py-4 space-y-4">
+                <div className="flex items-end justify-between">
+                  <div>
+                    <p className="text-[10px] uppercase text-slate-500 tracking-wider">Balance</p>
+                    <p className={`text-2xl font-bold ${viewingAccount.category === 'Asset' ? 'text-emerald-400' : 'text-rose-400'}`}>
+                      ${viewingAccount.balance.toLocaleString('en-US', { minimumFractionDigits: 2 })}
+                    </p>
+                  </div>
+                  <div className="text-right">
+                    <p className="text-[10px] uppercase text-slate-500 tracking-wider">APR</p>
+                    <p className="text-sm text-slate-300">{viewingAccount.interestRate}%</p>
+                  </div>
+                </div>
+
+                {linkedVal > 0 && (
+                  <div className="bg-slate-900/50 border border-slate-700 rounded-lg px-3 py-2 text-xs">
+                    <span className="text-slate-400">{viewingAccount.linkedAssetLabel || 'Asset Value'}: </span>
+                    <span className="text-slate-200 font-medium">${linkedVal.toLocaleString('en-US', { minimumFractionDigits: 0 })}</span>
+                    <span className="text-slate-400"> · Equity: </span>
+                    <span className={(linkedVal - viewingAccount.balance) >= 0 ? 'text-emerald-400 font-medium' : 'text-rose-400 font-medium'}>${(linkedVal - viewingAccount.balance).toLocaleString('en-US', { minimumFractionDigits: 0 })}</span>
+                  </div>
+                )}
+
+                <div className="flex items-center justify-between">
+                  <p className="text-[10px] uppercase text-slate-500 tracking-wider">Statement</p>
+                  <StaleBadge statementDate={viewingAccount.statementDate} />
+                </div>
+
+                <div>
+                  <p className="text-[10px] uppercase text-slate-500 tracking-wider mb-2 flex items-center gap-1.5">
+                    <i data-lucide="line-chart" className="w-3.5 h-3.5 text-blue-400"></i> Balance History
+                  </p>
+                  <MiniLineChart points={history} />
+                </div>
+
+                {viewingAccount.notes && (
+                  <div>
+                    <p className="text-[10px] uppercase text-slate-500 tracking-wider mb-1">Notes</p>
+                    <p className="text-xs text-slate-300 bg-slate-900/50 border border-slate-700 rounded-lg px-3 py-2 whitespace-pre-wrap">{viewingAccount.notes}</p>
+                  </div>
+                )}
+
+                <div className="flex flex-wrap gap-2 pt-1">
+                  {linkedDoc && (
+                    <button onClick={() => setViewingDocument(linkedDoc)} className="flex items-center gap-1.5 bg-slate-700 hover:bg-slate-600 text-slate-200 px-3 py-1.5 rounded-lg text-[11px] font-medium transition">
+                      <i data-lucide="paperclip" className="w-3.5 h-3.5"></i> View Document
+                    </button>
+                  )}
+                  {viewingAccount.loginUrl && (
+                    <a href={viewingAccount.loginUrl} target="_blank" rel="noopener noreferrer" className="flex items-center gap-1.5 bg-slate-700 hover:bg-slate-600 text-slate-200 px-3 py-1.5 rounded-lg text-[11px] font-medium transition">
+                      <i data-lucide="external-link" className="w-3.5 h-3.5"></i> Open Statement Portal
+                    </a>
+                  )}
+                </div>
+              </div>
+
+              <div className="flex gap-2 border-t border-slate-700 p-4">
+                <button onClick={() => setViewingAccount(null)} className="px-4 py-2 rounded-lg text-xs bg-slate-700 hover:bg-slate-600 text-slate-200">Close</button>
+                <button
+                  onClick={() => { openEditAccount(viewingAccount); setViewingAccount(null); }}
+                  className="flex-1 flex items-center justify-center gap-1.5 px-4 py-2 rounded-lg text-xs font-medium text-white shadow-md bg-emerald-600 hover:bg-emerald-500"
+                >
+                  <i data-lucide="pencil" className="w-3.5 h-3.5"></i> Edit
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })();
 
       const helpModalEl = helpOpen && (
         <div className="no-print fixed inset-0 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4 z-50">
@@ -2632,6 +2727,7 @@ Rules:
           {strategyChatModalEl}
           {helpModalEl}
           {budgetImportModalEl}
+          {viewingAccountModalEl}
           <div className="max-w-6xl mx-auto space-y-6">
 
             {/* HEADER */}
@@ -2870,7 +2966,7 @@ Rules:
                               const linkedDoc = getDocumentForAccount(rec.id);
                               const linkedVal = parseFloat(rec.linkedAssetValue) || 0;
                               return (
-                                <tr key={rec.id} className="hover:bg-slate-700/30">
+                                <tr key={rec.id} onClick={() => setViewingAccount(rec)} className="hover:bg-slate-700/30 cursor-pointer">
                                   <td className="py-2.5 font-medium text-slate-200">{rec.institution}</td>
                                   <td className="py-2.5 text-slate-400">{rec.accountType}</td>
                                   <td className="py-2.5 text-slate-400">{rec.interestRate}%</td>
@@ -2886,7 +2982,10 @@ Rules:
                                     )}
                                   </td>
                                   <td className="py-2.5"><StaleBadge statementDate={rec.statementDate} /></td>
-                                  <td className="py-2.5 text-right whitespace-nowrap">
+                                  <td className="py-2.5 text-right whitespace-nowrap" onClick={(e) => e.stopPropagation()}>
+                                    {rec.loginUrl && (
+                                      <a href={rec.loginUrl} target="_blank" rel="noopener noreferrer" title={`Open ${rec.institution}'s site for the next statement`} className="text-slate-500 hover:text-blue-400 mr-2 inline-block"><i data-lucide="external-link" className="w-4 h-4 inline"></i></a>
+                                    )}
                                     {linkedDoc && (
                                       <button onClick={() => setViewingDocument(linkedDoc)} title="View document" className="text-slate-500 hover:text-blue-400 mr-2"><i data-lucide="paperclip" className="w-4 h-4 inline"></i></button>
                                     )}
@@ -3693,6 +3792,18 @@ Rules:
                         </p>
                       </div>
                     )}
+
+                    <div>
+                      <label className="text-[11px] text-slate-400 block mb-1">Statement Portal Link (optional)</label>
+                      <input
+                        type="url"
+                        value={pendingParsedData.loginUrl || ''}
+                        onChange={(e) => setPendingParsedData({ ...pendingParsedData, loginUrl: e.target.value })}
+                        placeholder="https://client.schwab.com"
+                        className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-100 focus:outline-none focus:border-emerald-500"
+                      />
+                      <p className="text-[10px] text-slate-500 mt-1">Where you log in to grab the next statement. Adds a quick-open link on this account in the ledger.</p>
+                    </div>
 
                     <div>
                       <label className="text-[11px] text-slate-400 block mb-1">Account Notes (optional)</label>
