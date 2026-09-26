@@ -225,7 +225,7 @@
     const DEFAULT_VISION_MODEL = 'qwen/qwen3.6-27b';
     const DEFAULT_STALE_DAYS = 60;
     const BACKUP_STALE_DAYS = 30;
-    const APP_VERSION = 'finvault-v22';
+    const APP_VERSION = 'finvault-v23';
 
     // ============================================================
     // CLIENT-SIDE AUTO-CATEGORIZATION (used when no AI key is set)
@@ -784,6 +784,10 @@ Rules:
         try { return localStorage.getItem('last_backup_at') || ''; } catch (e) { return ''; }
       });
 
+      const [restorePreview, setRestorePreview] = useState(null);
+      const [restoreStep, setRestoreStep] = useState(null); // null | 'overview' | 'conflicts'
+      const [restoreConflictChoices, setRestoreConflictChoices] = useState({});
+
       // PIN lock — read synchronously so a locked vault never flashes its data before the lock renders
       const [pinLockEnabled, setPinLockEnabled] = useState(() => {
         try { return localStorage.getItem('pin_lock_enabled') === 'true'; } catch (e) { return false; }
@@ -1012,7 +1016,7 @@ Rules:
         } catch (err) {
           console.warn('Icon render skipped (lucide error):', err);
         }
-      }, [records, expenses, documents, contacts, activeTab, parsing, pendingParsedData, isSettingsOpen, viewingDocument, expenseCategoryFilter, expenseSearchQuery, strategyReport, strategyLoading, installPromptEvent, isLocked, pinError, pinLockEnabled, showPinSetup, toasts, confirmModal, strategyChatOpen, strategyChatMessages, strategyChatLoading, goals, accountHistory, editingGoalId, helpOpen, helpCardIndex, budgetImportOpen, budgetImportRows, budgetImportLoading, viewingAccount]);
+      }, [records, expenses, documents, contacts, activeTab, parsing, pendingParsedData, isSettingsOpen, viewingDocument, expenseCategoryFilter, expenseSearchQuery, strategyReport, strategyLoading, installPromptEvent, isLocked, pinError, pinLockEnabled, showPinSetup, toasts, confirmModal, strategyChatOpen, strategyChatMessages, strategyChatLoading, goals, accountHistory, editingGoalId, helpOpen, helpCardIndex, budgetImportOpen, budgetImportRows, budgetImportLoading, viewingAccount, restorePreview, restoreStep, restoreConflictChoices]);
 
       const loadAllData = async () => {
         try {
@@ -1126,7 +1130,8 @@ Rules:
           frequency: expForm.frequency === 'annual' ? 'annual' : 'monthly',
           dueDay: parseInt(expForm.dueDay, 10) || 1,
           dueMonth: expForm.frequency === 'annual' ? (parseInt(expForm.dueMonth, 10) || 1) : null,
-          autoPay: expForm.autoPay
+          autoPay: expForm.autoPay,
+          updatedAt: new Date().toISOString()
         };
 
         await saveDBItem(STORES.EXPENSES, expRecord);
@@ -1396,7 +1401,8 @@ Rules:
         if (!contactForm.name) return;
         const record = {
           id: editingContactId || 'contact_' + Date.now(),
-          ...contactForm
+          ...contactForm,
+          updatedAt: new Date().toISOString()
         };
         await saveDBItem(STORES.CONTACTS, record);
         setContactForm({ name: '', role: '', phone: '', email: '', notes: '' });
@@ -1436,7 +1442,8 @@ Rules:
             type: goalForm.type,
             targetAmount: parseFloat(goalForm.targetAmount) || 0,
             targetDate: goalForm.targetDate || '',
-            linkedAccountId: goalForm.linkedAccountId || null
+            linkedAccountId: goalForm.linkedAccountId || null,
+            updatedAt: new Date().toISOString()
           };
           await saveDBItem(STORES.GOALS, updated);
         } else {
@@ -1452,7 +1459,8 @@ Rules:
             startingAmount,
             manualCurrentAmount: linkedAccount ? null : (parseFloat(goalForm.manualCurrentAmount) || 0),
             manualHistory: linkedAccount ? [] : [{ date: isoToday(), value: startingAmount }],
-            createdAt: new Date().toISOString()
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString()
           };
           await saveDBItem(STORES.GOALS, newGoal);
         }
@@ -1498,7 +1506,8 @@ Rules:
         const updated = {
           ...goal,
           manualCurrentAmount: newValue,
-          manualHistory: [...filteredHistory, { date: today, value: newValue }]
+          manualHistory: [...filteredHistory, { date: today, value: newValue }],
+          updatedAt: new Date().toISOString()
         };
         await saveDBItem(STORES.GOALS, updated);
         loadAllData();
@@ -1536,59 +1545,163 @@ Rules:
         showToast('success', 'Backup downloaded — saved to your device.');
       };
 
+      // ---------------- SMART RESTORE (merge vs. replace, with per-conflict review) ----------------
+      const RESTORE_ENTITY_CONFIG = [
+        { key: 'records', store: STORES.ACCOUNTS, label: 'Accounts', summarize: (r) => `${r.institution} (${r.accountType}) — $${(r.balance || 0).toLocaleString('en-US', { minimumFractionDigits: 2 })}` },
+        { key: 'expenses', store: STORES.EXPENSES, label: 'Expenses', summarize: (e) => `${e.name} — $${(e.amount || 0).toLocaleString('en-US', { minimumFractionDigits: 2 })}/${e.frequency === 'annual' ? 'yr' : 'mo'}` },
+        { key: 'contacts', store: STORES.CONTACTS, label: 'Contacts', summarize: (c) => `${c.name}${c.role ? ' (' + c.role + ')' : ''}` },
+        { key: 'goals', store: STORES.GOALS, label: 'Goals', summarize: (g) => `${g.name} — target $${(g.targetAmount || 0).toLocaleString('en-US', { minimumFractionDigits: 0 })}` },
+        { key: 'documents', store: STORES.DOCUMENTS, label: 'Documents', summarize: (d) => d.fileName || 'Untitled document' }
+      ];
+
+      const diffEntityList = (currentList, backupList) => {
+        const currentById = new Map((currentList || []).map(item => [item.id, item]));
+        const backupById = new Map((backupList || []).map(item => [item.id, item]));
+        const onlyInBackup = [];
+        const onlyInCurrent = [];
+        const conflicts = [];
+        for (const [id, backupItem] of backupById) {
+          if (currentById.has(id)) {
+            const currentItem = currentById.get(id);
+            if (JSON.stringify(currentItem) !== JSON.stringify(backupItem)) {
+              const curT = currentItem.updatedAt, bakT = backupItem.updatedAt;
+              const defaultSide = (curT && bakT) ? (curT >= bakT ? 'current' : 'backup') : 'current';
+              conflicts.push({ id, current: currentItem, backup: backupItem, defaultSide });
+            }
+          } else {
+            onlyInBackup.push(backupItem);
+          }
+        }
+        for (const [id, currentItem] of currentById) {
+          if (!backupById.has(id)) onlyInCurrent.push(currentItem);
+        }
+        return { onlyInBackup, onlyInCurrent, conflicts };
+      };
+
+      const buildRestorePreview = (backupData) => {
+        const entities = {};
+        for (const cfg of RESTORE_ENTITY_CONFIG) {
+          const currentList = { records, expenses, documents, contacts, goals }[cfg.key];
+          entities[cfg.key] = diffEntityList(currentList, backupData[cfg.key]);
+        }
+        const scalarDiffs = {};
+        if (backupData.notes !== undefined && backupData.notes !== notes) {
+          scalarDiffs.notes = { current: notes, backup: backupData.notes };
+        }
+        if (backupData.monthlyIncome !== undefined && Number(backupData.monthlyIncome) !== Number(monthlyIncome)) {
+          scalarDiffs.monthlyIncome = { current: monthlyIncome, backup: backupData.monthlyIncome };
+        }
+        const allUpdatedAts = [...records, ...expenses, ...contacts, ...goals].map(x => x.updatedAt).filter(Boolean);
+        const mostRecentCurrentUpdate = allUpdatedAts.length ? allUpdatedAts.sort().slice(-1)[0] : null;
+        const totalConflicts = Object.values(entities).reduce((a, e) => a + e.conflicts.length, 0) + Object.keys(scalarDiffs).length;
+        return { backupData, entities, scalarDiffs, mostRecentCurrentUpdate, totalConflicts };
+      };
+
       const handleRestoreBackup = (e) => {
         const file = e.target.files[0];
         if (!file) return;
 
         const reader = new FileReader();
-        reader.onload = async (evt) => {
+        reader.onload = (evt) => {
           try {
             const data = JSON.parse(evt.target.result);
-            if (data.records && Array.isArray(data.records)) {
-              await clearStore(STORES.ACCOUNTS);
-              for (const rec of data.records) await saveDBItem(STORES.ACCOUNTS, rec);
-            }
-            if (data.expenses && Array.isArray(data.expenses)) {
-              await clearStore(STORES.EXPENSES);
-              for (const exp of data.expenses) await saveDBItem(STORES.EXPENSES, exp);
-            }
-            if (data.documents && Array.isArray(data.documents)) {
-              await clearStore(STORES.DOCUMENTS);
-              for (const doc of data.documents) await saveDBItem(STORES.DOCUMENTS, doc);
-            }
-            if (data.contacts && Array.isArray(data.contacts)) {
-              await clearStore(STORES.CONTACTS);
-              for (const c of data.contacts) await saveDBItem(STORES.CONTACTS, c);
-            }
-            if (data.networthHistory && Array.isArray(data.networthHistory)) {
-              await clearStore(STORES.NETWORTH_HISTORY);
-              for (const h of data.networthHistory) await saveDBItem(STORES.NETWORTH_HISTORY, h);
-            }
-            if (data.accountHistory && Array.isArray(data.accountHistory)) {
-              await clearStore(STORES.ACCOUNT_HISTORY);
-              for (const h of data.accountHistory) await saveDBItem(STORES.ACCOUNT_HISTORY, h);
-            }
-            if (data.goals && Array.isArray(data.goals)) {
-              await clearStore(STORES.GOALS);
-              for (const g of data.goals) await saveDBItem(STORES.GOALS, g);
-            }
-            if (data.monthlyIncome) {
-              setMonthlyIncome(data.monthlyIncome);
-              localStorage.setItem('monthly_income', data.monthlyIncome);
-            }
-            if (data.notes) {
-              setNotes(data.notes);
-              localStorage.setItem('executor_notes', data.notes);
-            }
-            await loadAllData();
-            showToast('success', 'Vault restored successfully!');
-            setIsSettingsOpen(false);
+            const preview = buildRestorePreview(data);
+            setRestorePreview(preview);
+            setRestoreStep('overview');
+            setRestoreConflictChoices({});
           } catch (err) {
-            console.error('Failed to restore backup:', err);
+            console.error('Failed to parse backup:', err);
             showToast('error', 'Invalid backup JSON file.');
           }
         };
         reader.readAsText(file);
+        e.target.value = '';
+      };
+
+      const closeRestoreFlow = () => {
+        setRestorePreview(null);
+        setRestoreStep(null);
+        setRestoreConflictChoices({});
+      };
+
+      const performReplaceRestore = async () => {
+        const data = restorePreview.backupData;
+        try {
+          if (Array.isArray(data.records)) { await clearStore(STORES.ACCOUNTS); for (const rec of data.records) await saveDBItem(STORES.ACCOUNTS, rec); }
+          if (Array.isArray(data.expenses)) { await clearStore(STORES.EXPENSES); for (const exp of data.expenses) await saveDBItem(STORES.EXPENSES, exp); }
+          if (Array.isArray(data.documents)) { await clearStore(STORES.DOCUMENTS); for (const doc of data.documents) await saveDBItem(STORES.DOCUMENTS, doc); }
+          if (Array.isArray(data.contacts)) { await clearStore(STORES.CONTACTS); for (const c of data.contacts) await saveDBItem(STORES.CONTACTS, c); }
+          if (Array.isArray(data.networthHistory)) { await clearStore(STORES.NETWORTH_HISTORY); for (const h of data.networthHistory) await saveDBItem(STORES.NETWORTH_HISTORY, h); }
+          if (Array.isArray(data.accountHistory)) { await clearStore(STORES.ACCOUNT_HISTORY); for (const h of data.accountHistory) await saveDBItem(STORES.ACCOUNT_HISTORY, h); }
+          if (Array.isArray(data.goals)) { await clearStore(STORES.GOALS); for (const g of data.goals) await saveDBItem(STORES.GOALS, g); }
+          if (data.monthlyIncome) { setMonthlyIncome(data.monthlyIncome); localStorage.setItem('monthly_income', data.monthlyIncome); }
+          if (data.notes) { setNotes(data.notes); localStorage.setItem('executor_notes', data.notes); }
+          await loadAllData();
+          showToast('success', 'Vault replaced with backup contents.');
+          closeRestoreFlow();
+          setIsSettingsOpen(false);
+        } catch (err) {
+          console.error('Replace restore failed:', err);
+          showToast('error', 'Restore failed: ' + err.message);
+        }
+      };
+
+      const handleReplaceClick = () => {
+        const counts = RESTORE_ENTITY_CONFIG.map(cfg => `${restorePreview.entities[cfg.key].onlyInCurrent.length} ${cfg.label.toLowerCase()}`).filter(s => !s.startsWith('0')).join(', ');
+        requestConfirm({
+          title: 'Replace Everything',
+          message: `This deletes your current vault and loads the backup exactly as-is${counts ? ` — including removing ${counts} that only exist in your current vault, not in this backup` : ''}. This cannot be undone.`,
+          confirmLabel: 'Replace Everything',
+          danger: true,
+          onConfirm: performReplaceRestore
+        });
+      };
+
+      const handleMergeClick = () => {
+        if (restorePreview.totalConflicts > 0) {
+          setRestoreStep('conflicts');
+        } else {
+          performMergeRestore({});
+        }
+      };
+
+      const performMergeRestore = async (choices) => {
+        try {
+          const data = restorePreview.backupData;
+          for (const cfg of RESTORE_ENTITY_CONFIG) {
+            const diff = restorePreview.entities[cfg.key];
+            for (const item of diff.onlyInBackup) await saveDBItem(cfg.store, item);
+            for (const conflict of diff.conflicts) {
+              const chosen = (choices[cfg.key] && choices[cfg.key][conflict.id]) || conflict.defaultSide;
+              await saveDBItem(cfg.store, chosen === 'backup' ? conflict.backup : conflict.current);
+            }
+          }
+          // History stores: append-only trend data — union by key, current wins on same-key collision.
+          if (Array.isArray(data.networthHistory)) {
+            const existingDates = new Set(networthHistory.map(h => h.date));
+            for (const h of data.networthHistory) if (!existingDates.has(h.date)) await saveDBItem(STORES.NETWORTH_HISTORY, h);
+          }
+          if (Array.isArray(data.accountHistory)) {
+            const existingIds = new Set(accountHistory.map(h => h.id));
+            for (const h of data.accountHistory) if (!existingIds.has(h.id)) await saveDBItem(STORES.ACCOUNT_HISTORY, h);
+          }
+          // Scalars
+          if (restorePreview.scalarDiffs.notes) {
+            const chosen = choices.notes || 'current';
+            if (chosen === 'backup') { setNotes(data.notes); localStorage.setItem('executor_notes', data.notes); }
+          }
+          if (restorePreview.scalarDiffs.monthlyIncome) {
+            const chosen = choices.monthlyIncome || 'current';
+            if (chosen === 'backup') { setMonthlyIncome(data.monthlyIncome); localStorage.setItem('monthly_income', data.monthlyIncome); }
+          }
+          await loadAllData();
+          showToast('success', 'Vault merged with backup.');
+          closeRestoreFlow();
+          setIsSettingsOpen(false);
+        } catch (err) {
+          console.error('Merge restore failed:', err);
+          showToast('error', 'Merge failed: ' + err.message);
+        }
       };
 
       const performPurgeDatabase = async () => {
@@ -1895,7 +2008,8 @@ Rules:
             frequency: r.frequency === 'annual' ? 'annual' : 'monthly',
             dueDay: parseInt(r.dueDay, 10) || 1,
             dueMonth: r.frequency === 'annual' ? (parseInt(r.dueMonth, 10) || 1) : null,
-            autoPay: true
+            autoPay: true,
+            updatedAt: new Date().toISOString()
           });
         }
         setBudgetImportOpen(false);
@@ -2630,6 +2744,154 @@ Rules:
         </div>
       );
 
+      const setRestoreConflictChoice = (entityKey, id, side) => {
+        setRestoreConflictChoices(prev => ({
+          ...prev,
+          [entityKey]: { ...(prev[entityKey] || {}), [id]: side }
+        }));
+      };
+      const setRestoreScalarChoice = (key, side) => {
+        setRestoreConflictChoices(prev => ({ ...prev, [key]: side }));
+      };
+
+      const restoreModalEl = restorePreview && (
+        <div className="no-print fixed inset-0 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4 z-[70]">
+          <div className="bg-slate-800 border border-slate-700 rounded-xl w-full max-w-2xl shadow-2xl flex flex-col" style={{ maxHeight: '88vh' }}>
+            <div className="flex justify-between items-start border-b border-slate-700 px-5 py-4">
+              <div className="min-w-0">
+                <h3 className="text-sm font-bold text-slate-100 flex items-center gap-2">
+                  <i data-lucide="upload-cloud" className="w-4 h-4 text-blue-400"></i> {restoreStep === 'conflicts' ? 'Review Conflicts' : 'Restore Backup'}
+                </h3>
+                {restoreStep === 'overview' && restorePreview.backupData.exportedAt && (
+                  <p className="text-[11px] text-slate-500 mt-0.5">Backup exported {new Date(restorePreview.backupData.exportedAt).toLocaleString()}</p>
+                )}
+              </div>
+              <button onClick={closeRestoreFlow} className="text-slate-400 hover:text-slate-200 text-xs shrink-0">✕ Close</button>
+            </div>
+
+            <div className="flex-1 overflow-y-auto px-5 py-4 space-y-3">
+              {restoreStep === 'overview' && (
+                <React.Fragment>
+                  {restorePreview.mostRecentCurrentUpdate && restorePreview.backupData.exportedAt && restorePreview.mostRecentCurrentUpdate > restorePreview.backupData.exportedAt && (
+                    <div className="bg-amber-950/30 border border-amber-800/50 rounded-lg p-3 text-xs text-amber-300 flex items-start gap-2">
+                      <i data-lucide="alert-triangle" className="w-4 h-4 shrink-0 mt-0.5"></i>
+                      <span>You have data updated more recently ({new Date(restorePreview.mostRecentCurrentUpdate).toLocaleString()}) than this backup. "Replace Everything" would overwrite that — "Merge" keeps whichever side is newer for anything that conflicts.</span>
+                    </div>
+                  )}
+
+                  <div className="space-y-1.5">
+                    {RESTORE_ENTITY_CONFIG.map(cfg => {
+                      const diff = restorePreview.entities[cfg.key];
+                      if (diff.onlyInBackup.length === 0 && diff.onlyInCurrent.length === 0 && diff.conflicts.length === 0) return null;
+                      return (
+                        <div key={cfg.key} className="flex items-center justify-between bg-slate-900/50 border border-slate-700 rounded-lg px-3 py-2 text-xs">
+                          <span className="text-slate-300 font-medium">{cfg.label}</span>
+                          <span className="text-slate-500">
+                            {diff.onlyInBackup.length > 0 && <span className="text-emerald-400">+{diff.onlyInBackup.length} new</span>}
+                            {diff.onlyInBackup.length > 0 && (diff.onlyInCurrent.length > 0 || diff.conflicts.length > 0) && ' · '}
+                            {diff.onlyInCurrent.length > 0 && <span>{diff.onlyInCurrent.length} only in your vault</span>}
+                            {diff.onlyInCurrent.length > 0 && diff.conflicts.length > 0 && ' · '}
+                            {diff.conflicts.length > 0 && <span className="text-amber-400">{diff.conflicts.length} differ</span>}
+                          </span>
+                        </div>
+                      );
+                    })}
+                    {Object.keys(restorePreview.scalarDiffs).length > 0 && (
+                      <div className="flex items-center justify-between bg-slate-900/50 border border-slate-700 rounded-lg px-3 py-2 text-xs">
+                        <span className="text-slate-300 font-medium">Settings (notes / income)</span>
+                        <span className="text-amber-400">{Object.keys(restorePreview.scalarDiffs).length} differ</span>
+                      </div>
+                    )}
+                  </div>
+
+                  <p className="text-[11px] text-slate-500 pt-1">
+                    <strong className="text-slate-300">Merge</strong> keeps everything from both and only asks you about items that exist in both with different data.{' '}
+                    <strong className="text-slate-300">Replace</strong> wipes your current vault and loads this backup exactly as-is.
+                  </p>
+                </React.Fragment>
+              )}
+
+              {restoreStep === 'conflicts' && (
+                <React.Fragment>
+                  {RESTORE_ENTITY_CONFIG.map(cfg => {
+                    const diff = restorePreview.entities[cfg.key];
+                    if (diff.conflicts.length === 0) return null;
+                    return (
+                      <div key={cfg.key} className="space-y-2">
+                        <p className="text-[10px] uppercase text-slate-500 tracking-wider">{cfg.label} ({diff.conflicts.length})</p>
+                        {diff.conflicts.map(conflict => {
+                          const chosen = (restoreConflictChoices[cfg.key] && restoreConflictChoices[cfg.key][conflict.id]) || conflict.defaultSide;
+                          return (
+                            <div key={conflict.id} className="border border-slate-700 rounded-lg p-2.5 bg-slate-900/40 space-y-1.5">
+                              <button
+                                onClick={() => setRestoreConflictChoice(cfg.key, conflict.id, 'current')}
+                                className={`w-full text-left text-[11px] px-2.5 py-1.5 rounded-lg border transition ${chosen === 'current' ? 'border-emerald-500 bg-emerald-500/10 text-emerald-200' : 'border-slate-700 bg-slate-900 text-slate-400'}`}
+                              >
+                                <span className="font-mono text-[9px] uppercase mr-1.5 opacity-70">Current</span> {cfg.summarize(conflict.current)}
+                              </button>
+                              <button
+                                onClick={() => setRestoreConflictChoice(cfg.key, conflict.id, 'backup')}
+                                className={`w-full text-left text-[11px] px-2.5 py-1.5 rounded-lg border transition ${chosen === 'backup' ? 'border-blue-500 bg-blue-500/10 text-blue-200' : 'border-slate-700 bg-slate-900 text-slate-400'}`}
+                              >
+                                <span className="font-mono text-[9px] uppercase mr-1.5 opacity-70">Backup</span> {cfg.summarize(conflict.backup)}
+                              </button>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    );
+                  })}
+
+                  {restorePreview.scalarDiffs.notes && (
+                    <div className="space-y-2">
+                      <p className="text-[10px] uppercase text-slate-500 tracking-wider">Executor Notes</p>
+                      <div className="border border-slate-700 rounded-lg p-2.5 bg-slate-900/40 space-y-1.5">
+                        <button onClick={() => setRestoreScalarChoice('notes', 'current')} className={`w-full text-left text-[11px] px-2.5 py-1.5 rounded-lg border transition ${(restoreConflictChoices.notes || 'current') === 'current' ? 'border-emerald-500 bg-emerald-500/10 text-emerald-200' : 'border-slate-700 bg-slate-900 text-slate-400'}`}>
+                          <span className="font-mono text-[9px] uppercase mr-1.5 opacity-70">Current</span> {restorePreview.scalarDiffs.notes.current || '(empty)'}
+                        </button>
+                        <button onClick={() => setRestoreScalarChoice('notes', 'backup')} className={`w-full text-left text-[11px] px-2.5 py-1.5 rounded-lg border transition ${restoreConflictChoices.notes === 'backup' ? 'border-blue-500 bg-blue-500/10 text-blue-200' : 'border-slate-700 bg-slate-900 text-slate-400'}`}>
+                          <span className="font-mono text-[9px] uppercase mr-1.5 opacity-70">Backup</span> {restorePreview.scalarDiffs.notes.backup || '(empty)'}
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                  {restorePreview.scalarDiffs.monthlyIncome && (
+                    <div className="space-y-2">
+                      <p className="text-[10px] uppercase text-slate-500 tracking-wider">Monthly Income</p>
+                      <div className="border border-slate-700 rounded-lg p-2.5 bg-slate-900/40 space-y-1.5">
+                        <button onClick={() => setRestoreScalarChoice('monthlyIncome', 'current')} className={`w-full text-left text-[11px] px-2.5 py-1.5 rounded-lg border transition ${(restoreConflictChoices.monthlyIncome || 'current') === 'current' ? 'border-emerald-500 bg-emerald-500/10 text-emerald-200' : 'border-slate-700 bg-slate-900 text-slate-400'}`}>
+                          <span className="font-mono text-[9px] uppercase mr-1.5 opacity-70">Current</span> ${Number(restorePreview.scalarDiffs.monthlyIncome.current).toLocaleString()}
+                        </button>
+                        <button onClick={() => setRestoreScalarChoice('monthlyIncome', 'backup')} className={`w-full text-left text-[11px] px-2.5 py-1.5 rounded-lg border transition ${restoreConflictChoices.monthlyIncome === 'backup' ? 'border-blue-500 bg-blue-500/10 text-blue-200' : 'border-slate-700 bg-slate-900 text-slate-400'}`}>
+                          <span className="font-mono text-[9px] uppercase mr-1.5 opacity-70">Backup</span> ${Number(restorePreview.scalarDiffs.monthlyIncome.backup).toLocaleString()}
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </React.Fragment>
+              )}
+            </div>
+
+            <div className="flex gap-2 border-t border-slate-700 p-4">
+              {restoreStep === 'overview' ? (
+                <React.Fragment>
+                  <button onClick={handleReplaceClick} className="px-4 py-2 rounded-lg text-xs font-medium bg-rose-900/60 hover:bg-rose-800 text-rose-200">Replace Everything</button>
+                  <button onClick={handleMergeClick} className="flex-1 px-4 py-2 rounded-lg text-xs font-medium text-white shadow-md bg-emerald-600 hover:bg-emerald-500">
+                    {restorePreview.totalConflicts > 0 ? `Merge — Review ${restorePreview.totalConflicts}` : 'Merge'}
+                  </button>
+                </React.Fragment>
+              ) : (
+                <React.Fragment>
+                  <button onClick={() => setRestoreStep('overview')} className="px-4 py-2 rounded-lg text-xs bg-slate-700 hover:bg-slate-600 text-slate-200">Back</button>
+                  <button onClick={() => performMergeRestore(restoreConflictChoices)} className="flex-1 px-4 py-2 rounded-lg text-xs font-medium text-white shadow-md bg-emerald-600 hover:bg-emerald-500">Apply Merge</button>
+                </React.Fragment>
+              )}
+            </div>
+          </div>
+        </div>
+      );
+
       const budgetImportModalEl = budgetImportOpen && (
         <div className="no-print fixed inset-0 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4 z-50">
           <div className="bg-slate-800 border border-slate-700 rounded-xl w-full max-w-3xl shadow-2xl flex flex-col" style={{ maxHeight: '88vh' }}>
@@ -2780,6 +3042,7 @@ Rules:
           {helpModalEl}
           {budgetImportModalEl}
           {viewingAccountModalEl}
+          {restoreModalEl}
           <div className="max-w-6xl mx-auto space-y-6">
 
             {/* HEADER */}
