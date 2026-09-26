@@ -44,6 +44,58 @@
   <meta name="apple-mobile-web-app-title" content="FinVault">
   <meta name="mobile-web-app-capable" content="yes">
 
+  <style>
+    @keyframes toast-slide-in {
+      from { opacity: 0; transform: translateY(8px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+    .toast-item { animation: toast-slide-in 0.2s ease-out; }
+    @keyframes vault-spin { to { transform: rotate(360deg); } }
+
+    @media print {
+      .no-print { display: none !important; }
+      body { background: #fff !important; }
+      #strategy-report-print, #strategy-report-print * {
+        background: #fff !important;
+        color: #111 !important;
+        border-color: #ccc !important;
+        box-shadow: none !important;
+      }
+    }
+  </style>
+</head>
+<body class="bg-slate-900 text-slate-100 font-sans min-h-screen">
+
+  <!-- Static, no-JS-framework-required loading screen. Lives inside #root so
+       ReactDOM's first render wipes it out automatically the instant the app
+       mounts — no manual cleanup needed. Inline styles on purpose: Tailwind
+       hasn't loaded yet at this point (its script is below, deliberately —
+       see note by the script tags), so this can't depend on utility classes. -->
+  <div id="root">
+    <div id="app-loading" style="min-height:100vh;display:flex;align-items:center;justify-content:center;background:#0f172a;color:#e2e8f0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;padding:24px;">
+      <div style="text-align:center;">
+        <img src="icon-192.png" alt="" style="width:56px;height:56px;border-radius:14px;margin:0 auto 16px;display:block;" />
+        <div style="width:28px;height:28px;border:3px solid #1e293b;border-top-color:#10b981;border-radius:50%;margin:0 auto 14px;animation:vault-spin 0.8s linear infinite;"></div>
+        <p style="font-size:13px;color:#94a3b8;margin:0;">Loading Financial Vault…</p>
+        <p id="app-loading-slow" style="font-size:11px;color:#64748b;margin:10px 0 0;display:none;max-width:260px;">Still loading — a first load or an update can take several seconds. Nothing's stuck.</p>
+      </div>
+    </div>
+  </div>
+  <script>
+    // After a few seconds, reassure rather than let a silent spinner read as "stuck".
+    setTimeout(function () {
+      if (!window.__vaultMounted) {
+        var el = document.getElementById('app-loading-slow');
+        if (el) el.style.display = 'block';
+      }
+    }, 3000);
+  </script>
+
+  <!-- Every library below is deliberately loaded here (bottom of body), not in
+       <head>: classic <script> tags block HTML parsing, so if they were in
+       <head> the loading screen above could never paint before they finished —
+       this ordering is what actually lets the loading screen show up first. -->
+
   <!-- Tailwind CSS -->
   <script src="https://cdn.tailwindcss.com"></script>
 
@@ -62,29 +114,6 @@
 
   <!-- Lucide Icons (pinned — @latest can silently break this app on any upstream release) -->
   <script src="https://unpkg.com/lucide@1.47.0"></script>
-
-  <style>
-    @keyframes toast-slide-in {
-      from { opacity: 0; transform: translateY(8px); }
-      to { opacity: 1; transform: translateY(0); }
-    }
-    .toast-item { animation: toast-slide-in 0.2s ease-out; }
-
-    @media print {
-      .no-print { display: none !important; }
-      body { background: #fff !important; }
-      #strategy-report-print, #strategy-report-print * {
-        background: #fff !important;
-        color: #111 !important;
-        border-color: #ccc !important;
-        box-shadow: none !important;
-      }
-    }
-  </style>
-</head>
-<body class="bg-slate-900 text-slate-100 font-sans min-h-screen">
-
-  <div id="root"></div>
 
   <script type="text/babel">
     const { useState, useEffect, useRef } = React;
@@ -196,7 +225,7 @@
     const DEFAULT_VISION_MODEL = 'qwen/qwen3.6-27b';
     const DEFAULT_STALE_DAYS = 60;
     const BACKUP_STALE_DAYS = 30;
-    const APP_VERSION = 'finvault-v21';
+    const APP_VERSION = 'finvault-v22';
 
     // ============================================================
     // CLIENT-SIDE AUTO-CATEGORIZATION (used when no AI key is set)
