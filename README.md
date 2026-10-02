@@ -1,93 +1,214 @@
 <div align="center">
 
-# 🔐 Financial Vault & Capital Allocator
+<img src="assets/banner.svg" alt="Financial Vault & Capital Allocator — your whole financial picture, kept where only you can reach it." width="100%">
 
-**Your entire financial picture — accounts, budget, net worth, and estate plan — in one offline-first app that never phones home.**
+<br>
 
-[![PWA](https://img.shields.io/badge/PWA-installable-10b981?style=flat-square)](#-install-it-as-an-app)
-[![Local Storage Only](https://img.shields.io/badge/data-100%25%20local-10b981?style=flat-square)](#-your-data-never-leaves-your-device)
-[![No Backend](https://img.shields.io/badge/backend-none-10b981?style=flat-square)](#-your-data-never-leaves-your-device)
-[![License](https://img.shields.io/badge/license-MIT-10b981?style=flat-square)](#-license)
+**A local-first net worth tracker, budget, and estate continuity plan.**<br>
+Drop in a statement. Watch your picture build itself. Keep every byte on your own device.
+
+<br>
+
+[![Open the app](https://img.shields.io/badge/Open_the_app-c9a24b?style=for-the-badge&labelColor=0b1324)](https://johnlaz.github.io/wealth/app/)
+[![Website](https://img.shields.io/badge/Website-0b1324?style=for-the-badge&labelColor=0b1324&color=334155)](https://johnlaz.github.io/wealth/)
+
+![PWA](https://img.shields.io/badge/PWA-installable-10b981?style=flat-square&labelColor=0b1324)
+![Data](https://img.shields.io/badge/data-100%25_local-10b981?style=flat-square&labelColor=0b1324)
+![Backend](https://img.shields.io/badge/backend-none-10b981?style=flat-square&labelColor=0b1324)
+![Build step](https://img.shields.io/badge/build_step-none-c9a24b?style=flat-square&labelColor=0b1324)
+![License](https://img.shields.io/badge/license-MIT-c9a24b?style=flat-square&labelColor=0b1324)
+
+[Why](#why-it-exists) · [Features](#what-it-does) · [Privacy](#your-data-never-leaves-your-device) · [AI](#ai-is-optional-and-its-yours) · [Install](#install-it-like-an-app) · [Fine print](#what-to-know-before-you-rely-on-it) · [Run it](#run-it-yourself)
 
 </div>
 
----
+<br>
 
-Most budgeting apps want your bank credentials, your email, and a subscription. **Financial Vault** wants none of that. It's a single self-contained web app — no server, no sign-up, no sync — that turns your statements into a living net worth tracker, a real monthly budget, and a plan someone else could actually follow if they had to step in for you.
+## Why it exists
 
-Drop it on GitHub Pages, install it to your phone's home screen, and it just works — online or off.
+Most budgeting apps want your bank credentials, your email, and a subscription. **Financial Vault wants none of that.** It is a single self-contained web app with no server, no sign-up, and no sync. It turns your statements into a living net worth tracker, a real monthly budget, and a plan someone else could actually follow if they had to step in for you.
 
-## ✨ What it does
+Host it on GitHub Pages, install it on your phone's home screen, and it works online or off.
 
-**📊 Asset & Liability Vault**
-Drag in a statement — PDF, CSV, or even a photo — and it's read, classified, and logged automatically: institution, account type, balance, APR, and the statement's actual "as-of" date. Every uploaded document is stored and viewable later, not thrown away after parsing. Accounts flag themselves when their statement goes stale, so you always know what's current and what needs a refresh.
+<div align="center">
+<img src="assets/vault-preview.svg" alt="Net worth dashboard preview showing $336,310 with sample accounts" width="520">
+<br>
+<sub>The net worth view, shown with sample data.</sub>
+</div>
 
-**💸 Budget & Expenses**
-Recurring bills with real due dates, auto-categorization as you type, and a running view of what's due in the next two weeks. When a statement reveals a recurring charge — a subscription, a utility auto-draft, a separate loan payment — it's surfaced for you to confirm and drop straight into the budget, instead of getting buried in the account balance.
+<br>
 
-**📈 Strategic Capital Allocation**
-A deterministic, always-on read of your numbers: which debts are bleeding you dry on APR, how much idle cash is sitting in low-yield accounts, and what to do about both — no AI required for this part, just math on your own data.
+## What it does
 
-**🧠 Wealth Strategy Report**
-On-demand, AI-generated analysis (via your own Groq API key) that reviews your full financial snapshot — balances, spending by category, cashflow, net worth trend — and comes back with a plain-language assessment: strengths, risks, and a prioritized list of strategies to consider. Export it to PDF or print it whenever you want a second opinion.
+<table>
+<tr>
+<td width="50%" valign="top">
 
-**🛟 Continuity Plan**
-The feature every budgeting app skips: a place for key contacts (attorney, CPA, advisor), per-account notes, and executor instructions — plus a readiness checklist that tells you honestly whether someone could pick this up tomorrow without you. One click compiles all of it into a settlement-ready PDF.
+### 🏦 Asset & Liability Vault
+Drag in a statement as a PDF, CSV, or photo. The vault reads the institution, account type, balance, APR, and the statement's real as-of date, then asks you to **confirm before saving**. Every upload stays stored and viewable, and accounts flag themselves when a statement goes stale.
 
-**📉 Net Worth, Tracked Automatically**
-Every time you open the vault, it snapshots your net worth. Watch the trend line move without doing anything extra.
+</td>
+<td width="50%" valign="top">
 
-## 🔒 Your data never leaves your device
+### 💸 Budget & Expenses
+Recurring bills with real due dates, categories that fill in as you type, and a running view of what's due soon. Recurring charges found in statements are offered for one-click adding. You can also **import a budget spreadsheet or raw bank export** and confirm what it finds.
 
-There is no backend. No account. No cloud sync. Every account, document, expense, contact, and note lives in your browser's IndexedDB and localStorage — full stop. Statement text is only ever sent anywhere if *you* add a Groq API key for AI-assisted parsing, and even then it's a direct call from your browser to Groq, not through any server of ours, because there isn't one.
+</td>
+</tr>
+<tr>
+<td width="50%" valign="top">
 
-That also means: **back it up yourself.** Settings → Export Complete Backup writes a single `.json` file with everything in it. Clearing your browser data or losing the device without a backup means losing the vault. This is the trade-off for true privacy — treat the export like you'd treat a password manager's backup.
+### 📈 Strategic Capital Allocation
+A deterministic, always-on read of your numbers: which debts cost you the most in APR, and how much idle cash is sitting in low-yield accounts. **No AI involved**, just math on your own data.
 
-## 🤖 AI parsing, entirely optional
+</td>
+<td width="50%" valign="top">
 
-Add a [Groq](https://console.groq.com) API key in Settings and statement uploads get real LLM-powered extraction — better classification, recurring-charge detection, and the Wealth Strategy report. No key? The app falls back to rule-based parsing for statements and the Strategic Allocation tab keeps working exactly the same. Groq's available models change over time, so Settings includes a **Fetch Models** button that asks *your* account what it actually has access to, rather than the app guessing and breaking.
+### 🎯 Goals
+Savings targets and debt payoff goals. Link a goal to an account and progress follows its balance as new statements arrive, or update it by hand. With some history, you get a **projected completion date** from the recent trend.
 
-## 📲 Install it as an app
+</td>
+</tr>
+<tr>
+<td width="50%" valign="top">
 
-This is a full Progressive Web App:
+### 🧠 Wealth Strategy & Advisor Chat
+With your own Groq key, generate a report on your full picture: strengths, risks, and a prioritized list of strategies to consider. Export it to PDF, then **ask follow-up questions** grounded in your real balances.
 
-- **Desktop (Chrome/Edge):** visit the site → click the install icon in the address bar, or use the in-app **Install App** button.
-- **iOS Safari:** Share → *Add to Home Screen*.
-- **Android Chrome:** tap the **Install App** button, or Menu → *Install app*.
+</td>
+<td width="50%" valign="top">
 
-Once installed it opens in its own window, gets its own icon, and — thanks to a service worker that caches the app shell — keeps working with no internet connection. Your data was always local anyway.
+### 🛟 Continuity Plan
+The feature every budgeting app skips. Key contacts (attorney, CPA, advisor), per-account notes, and handoff instructions, plus a **readiness checklist** that tells you honestly whether someone could pick this up tomorrow. One click compiles a settlement-ready PDF.
 
-## 🛠 Tech stack
+</td>
+</tr>
+</table>
+
+**📉 Net worth, tracked automatically.** Each time you open the vault it snapshots your net worth, and per-account balances build their own trend history. The line moves without you doing anything extra.
+
+<br>
+
+## Your data never leaves your device
+
+There is no backend. No account. No cloud sync. Every account, document, expense, contact, and note lives in your browser's IndexedDB and localStorage, and nowhere else.
+
+<div align="center">
+<img src="assets/data-flow.svg" alt="Statements flow into your browser's local storage. Only if you add a Groq key does your browser send statement text directly to Groq. There is no Financial Vault server." width="720">
+</div>
+
+<br>
+
+| | |
+|---|---|
+| **No account to create or leak** | Open the app and start. There's no login database holding your name beside your balances. |
+| **AI sees statement text only if you allow it** | Without a Groq key, parsing runs on rules in your browser. With one, the call goes straight from your browser to Groq. |
+| **Backups are yours to keep** | **Settings → Export Complete Backup** writes one `.json` file with everything in it. The app nudges you when your last backup gets old. |
+
+> [!IMPORTANT]
+> Because nothing syncs, **your backup file is your only recovery plan.** Clearing your browser data or losing the device without an export means losing the vault. Treat the export like a password manager backup.
+
+<br>
+
+## AI is optional, and it's yours
+
+The core app is complete without it. Add a [Groq API key](https://console.groq.com/keys) in **Settings** and parsing, recurring-charge detection, and the strategy report get smarter.
+
+| Without a key | With your Groq key |
+|---|---|
+| Rule-based statement parsing | Better classification and recurring-charge detection |
+| Full vault, budget, goals, and continuity plan | Photo statements through a vision model |
+| Strategic allocation, identical to the keyed version | Wealth strategy report and advisor chat |
+| Nothing ever leaves your device | Called directly from your browser, on your account |
+
+Model lineups change often. Rather than hard-coding names that go stale, Settings has a **Fetch Models** button that asks *your* Groq account what it can use. Pick a text model, and a vision model if you want photo statements.
+
+<br>
+
+## Install it like an app
+
+A full Progressive Web App. Installed, it opens in its own window with its own icon, and a service worker keeps the app shell available with no connection.
+
+| Where | How |
+|---|---|
+| 🖥 **Desktop** (Chrome, Edge) | Click the install icon in the address bar, or use the in-app **Install App** button |
+| 📱 **iPhone / iPad** (Safari) | **Share → Add to Home Screen** |
+| 🤖 **Android** (Chrome) | Tap the in-app **Install App** button, or **Menu → Install app** |
+
+<br>
+
+## What to know before you rely on it
+
+- **Back it up yourself.** See the note above. This is the price of true privacy.
+- **The PIN lock is a lock screen, not encryption.** It gates the app on a device but does not encrypt what the browser stores. Use your device's own protections too.
+- **Check what the parser extracts.** Statement parsing, AI or rule-based, can make mistakes. Confirm figures before saving.
+- **Not financial, legal, or tax advice.** The strategy report and allocation suggestions come from the numbers you enter. They support your record-keeping and are no substitute for a licensed professional.
+
+<br>
+
+## Tech stack
 
 | Layer | Choice |
 |---|---|
-| UI | React 18 (via CDN, in-browser Babel — no build step) |
+| UI | React 18 via CDN, in-browser Babel. No build step |
 | Styling | Tailwind CSS |
-| Storage | IndexedDB (accounts, documents, expenses, contacts, net worth history) + localStorage (settings) |
-| Statement parsing | pdf.js + PapaParse, with optional Groq LLM extraction |
+| Storage | IndexedDB (accounts, documents, expenses, contacts, goals, history) and localStorage (settings) |
+| Statement parsing | pdf.js and PapaParse, with optional Groq LLM extraction |
+| Spreadsheet import | SheetJS |
 | PDF export | jsPDF |
 | Icons | Lucide |
-| Hosting | Static — GitHub Pages or any static host |
+| Hosting | Static. GitHub Pages or any static host |
 
-No npm install, no build pipeline, no framework version drift to manage. Open `index.html` and it runs.
+No npm install, no build pipeline, no framework version drift. Open the app's `index.html` and it runs.
 
-## 🚀 Getting started
+<br>
+
+## Run it yourself
 
 ```bash
-git clone <this-repo>
-cd financial-vault-pwa
-# Just open index.html in a browser — that's it.
+git clone https://github.com/johnlaz/wealth.git
+cd wealth
+# Serve the folder with any static server, for example:
+python3 -m http.server 8080
+# then open http://localhost:8080/
 ```
 
-**To deploy on GitHub Pages:** push the `financial-vault-pwa/` folder (keeping `index.html`, `manifest.json`, `sw.js`, and `icons/` together at the same level) to a repo and enable Pages on that branch. The manifest and service worker use relative paths, so it works whether it's served from the repo root or a subpath.
+Service workers and installability need `http://localhost` or HTTPS, so serving the folder beats double-clicking `index.html`.
 
-**To add AI parsing:** open the app → Settings → paste a [Groq API key](https://console.groq.com/keys) → Fetch Models → pick a text model (and a vision model, if you want photo/image statement parsing).
+### Project layout
 
-## ⚠️ Disclaimer
+```text
+wealth/
+├── index.html        Landing page (the website)
+├── sw.js             Retires the pre-/app service worker on old installs
+├── assets/           README graphics
+├── README.md
+└── app/              The Financial Vault PWA
+    ├── index.html    The whole app
+    ├── manifest.json
+    ├── sw.js         Offline app shell (cache: finvault-v24)
+    └── *.png, *.ico  App and favicon icons
+```
 
-This tool is for personal record-keeping and organization. The Wealth Strategy report and Strategic Allocation suggestions are generated from the numbers you enter — they are not financial, legal, or tax advice, and nothing here should be treated as a substitute for a licensed professional. Statement parsing (AI or rule-based) can make mistakes; always verify extracted figures before relying on them.
+### Deploy to GitHub Pages
 
-## 📄 License
+Push the repo and enable Pages on the branch root. The landing page is served at the root and the app at `/app/`. Every path is relative, so it works from a repo subpath as well.
 
-MIT — do what you want with it.
+### Add AI parsing
 
+Open the app, go to **Settings**, paste a [Groq API key](https://console.groq.com/keys), choose **Fetch Models**, and pick a text model (and a vision model for photo statements).
+
+<br>
+
+## Disclaimer
+
+This tool is for personal record-keeping and organization. Nothing it produces is financial, legal, or tax advice. Always verify extracted figures before relying on them.
+
+## License
+
+MIT. Do what you want with it.
+
+<div align="center">
+<br>
+<sub>Built by <b>LAZLAB Creations</b></sub>
+</div>
