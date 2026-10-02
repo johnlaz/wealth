@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 560 420" width="560" height="420" role="img" aria-label="Net worth dashboard preview with sample data">
+  <defs>
+    <linearGradient id="f" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#c9a24b" stop-opacity=".30"/><stop offset="1" stop-color="#c9a24b" stop-opacity="0"/></linearGradient>
+    <linearGradient id="c" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#1b2640"/><stop offset="1" stop-color="#0f182c"/></linearGradient>
+  </defs>
+  <rect width="560" height="420" rx="24" fill="#0b1324"/>
+  <rect x="20" y="20" width="520" height="380" rx="22" fill="url(#c)" stroke="#e2e8f0" stroke-opacity=".18" stroke-width="1.5"/>
+  <g font-family="-apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif">
+    <text x="46" y="58" font-size="14" fill="#8b9ab3">Net worth</text>
+    <text x="46" y="102" font-size="42" font-family="Georgia, 'Times New Roman', serif" font-weight="700" fill="#f3eee2">$336,310</text>
+    <text x="46" y="128" font-size="14" fill="#6ee7b7">+$3,120 since last month</text>
+    <rect x="432" y="38" width="86" height="24" rx="12" fill="none" stroke="#e2e8f0" stroke-opacity=".2"/>
+    <text x="475" y="55" font-size="12" text-anchor="middle" fill="#8b9ab3">Sample data</text>
+  </g>
+  <path d="M46 214 C 90 208 120 202 168 196 S 240 184 290 170 S 370 160 420 140 S 480 126 514 118 L514 232 L46 232Z" fill="url(#f)"/>
+  <path d="M46 214 C 90 208 120 202 168 196 S 240 184 290 170 S 370 160 420 140 S 480 126 514 118" fill="none" stroke="#e4c882" stroke-width="3" stroke-linecap="round"/>
+  <circle cx="514" cy="118" r="5" fill="#e4c882"/>
+  <g font-family="-apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="15">
+    <line x1="46" y1="244" x2="514" y2="244" stroke="#e2e8f0" stroke-opacity=".12"/>
+    <text x="46" y="270" fill="#cbd5e1">Checking</text><text x="514" y="270" text-anchor="end" fill="#f3eee2">$12,480</text>
+    <line x1="46" y1="282" x2="514" y2="282" stroke="#e2e8f0" stroke-opacity=".12"/>
+    <text x="46" y="308" fill="#cbd5e1">Brokerage</text><text x="514" y="308" text-anchor="end" fill="#f3eee2">$161,900</text>
+    <line x1="46" y1="320" x2="514" y2="320" stroke="#e2e8f0" stroke-opacity=".12"/>
+    <text x="46" y="346" fill="#cbd5e1">Home equity</text><text x="514" y="346" text-anchor="end" fill="#f3eee2">$176,240</text>
+    <line x1="46" y1="358" x2="514" y2="358" stroke="#e2e8f0" stroke-opacity=".12"/>
+    <text x="46" y="384" fill="#cbd5e1">Auto loan · 6.9% APR</text><text x="514" y="384" text-anchor="end" fill="#f08a8a">−$14,310</text>
+  </g>
+</svg>
