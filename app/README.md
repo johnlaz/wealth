@@ -1,6 +1,5 @@
 <div align="center">
 
-<img src="assets/banner.svg" alt="Financial Vault & Capital Allocator — your whole financial picture, kept where only you can reach it." width="100%">
 
 <br>
 
