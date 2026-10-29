@@ -83,6 +83,14 @@ The feature every budgeting app skips. Key contacts (attorney, CPA, advisor), pe
 
 </td>
 </tr>
+<tr>
+<td colspan="2" valign="top">
+
+### 🖨️ Professional Reports & Exports
+Six print-ready PDF reports with a cover page, contents, running headers and page numbers: the **Estate Settlement Package**, **Continuity & Handoff Plan**, **Net Worth Statement**, **Budget & Cash Flow**, **Goals Progress** and **Wealth Strategy**. Download or print any of them from the **Reports** button, plus an **Excel workbook** of your data. Everything is built on your device.
+
+</td>
+</tr>
 </table>
 
 **📉 Net worth, tracked automatically.** Each time you open the vault it snapshots your net worth, and per-account balances build their own trend history. The line moves without you doing anything extra.
@@ -155,7 +163,7 @@ A full Progressive Web App. Installed, it opens in its own window with its own i
 | Storage | IndexedDB (accounts, documents, expenses, contacts, goals, history) and localStorage (settings) |
 | Statement parsing | pdf.js and PapaParse, with optional Groq LLM extraction |
 | Spreadsheet import | SheetJS |
-| PDF export | jsPDF |
+| PDF export | jsPDF + jsPDF-AutoTable |
 | Icons | Lucide |
 | Hosting | Static. GitHub Pages or any static host |
 
