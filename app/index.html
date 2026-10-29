@@ -110,6 +110,7 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
   <script src="https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js"></script>
 
   <!-- Lucide Icons (pinned — @latest can silently break this app on any upstream release) -->
@@ -225,7 +226,7 @@
     const DEFAULT_VISION_MODEL = 'qwen/qwen3.6-27b';
     const DEFAULT_STALE_DAYS = 60;
     const BACKUP_STALE_DAYS = 30;
-    const APP_VERSION = 'finvault-v23';
+    const APP_VERSION = 'finvault-v24';
 
     // ============================================================
     // CLIENT-SIDE AUTO-CATEGORIZATION (used when no AI key is set)
@@ -757,6 +758,1160 @@ Rules:
       reader.readAsDataURL(file);
     });
 
+    // >>> REPORT KIT (generated block) >>>
+    // ============================================================
+    // REPORT KIT — professional PDF + Excel reports
+    // One shared layout engine (cover page, running header/footer, page
+    // numbers, real tables, vector charts) used by every printed/exported
+    // report. Pure functions of a plain `data` object, so it never touches
+    // React state. Brand: Financial Vault navy + gold.
+    // ============================================================
+    const ReportKit = (() => {
+      const C = {
+        navy: [11, 19, 36], navy2: [24, 38, 68], gold: [201, 162, 75], goldDk: [146, 112, 36],
+        ink: [31, 41, 55], muted: [107, 114, 128], faint: [156, 163, 175], rule: [226, 229, 234],
+        band: [247, 245, 238], zebra: [250, 249, 245], white: [255, 255, 255],
+        green: [21, 128, 61], red: [190, 18, 60], amber: [180, 83, 9], blue: [37, 99, 235]
+      };
+      const SERIES = [[30, 58, 110], [201, 162, 75], [19, 120, 120], [94, 106, 128], [126, 63, 110], [170, 95, 40], [70, 130, 180], [120, 150, 90]];
+      const P = { w: 215.9, h: 279.4, mx: 18, top: 27, bottom: 22 }; // US Letter, mm
+      const CW = P.w - P.mx * 2;
+      const PT = 0.3528; // 1pt in mm
+
+      // ---------- formatting helpers ----------
+      const num = (v) => { const n = parseFloat(v); return isFinite(n) ? n : 0; };
+      const sum = (arr, fn) => arr.reduce((s, x) => s + num(fn ? fn(x) : x), 0);
+
+      // jsPDF's built-in fonts only cover WinAnsi — anything else prints as garbage.
+      // Keep what is safe, translate a few common symbols, drop the rest.
+      const WIN_EXTRA = new Set(['€', '‚', 'ƒ', '„', '…', '†', '‡', 'ˆ', '‰', 'Š', '‹', 'Œ', 'Ž', '‘', '’', '“', '”', '•', '–', '—', '˜', '™', 'š', '›', 'œ', 'ž', 'Ÿ']);
+      const REPL = { '→': '->', '←': '<-', '↳': '>', '≥': '>=', '≤': '<=', '−': '-', ' ': ' ', ' ': ' ', '​': '', '‑': '-', '✓': '', '✔': '', '👉': '' };
+      const safe = (s) => {
+        if (s === null || s === undefined) return '';
+        let out = '';
+        for (const ch of String(s)) {
+          if (REPL[ch] !== undefined) { out += REPL[ch]; continue; }
+          const c = ch.codePointAt(0);
+          if (c === 10 || c === 13 || (c >= 32 && c <= 126) || (c >= 160 && c <= 255) || WIN_EXTRA.has(ch)) out += ch;
+        }
+        return out;
+      };
+
+      const money = (n, dec = 2) => {
+        const v = num(n);
+        return (v < 0 ? '-' : '') + '$' + Math.abs(v).toLocaleString('en-US', { minimumFractionDigits: dec, maximumFractionDigits: dec });
+      };
+      const moneyShort = (n) => {
+        const v = num(n), a = Math.abs(v), s = v < 0 ? '-' : '';
+        if (a >= 1e6) return s + '$' + (a / 1e6).toFixed(a >= 1e7 ? 0 : 1) + 'M';
+        if (a >= 1e3) return s + '$' + (a / 1e3).toFixed(a >= 1e5 ? 0 : 1) + 'k';
+        return s + '$' + a.toFixed(0);
+      };
+      const pctStr = (n, dec = 0) => num(n).toFixed(dec) + '%';
+      const parseISO = (s) => { const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(s || ''); return m ? new Date(+m[1], +m[2] - 1, +m[3]) : null; };
+      const fmtDate = (s) => {
+        const d = s instanceof Date ? s : parseISO(s);
+        return d && !isNaN(d) ? d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : '—';
+      };
+      const longDate = (d) => (d || new Date()).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' });
+      const ordinal = (n) => { const v = parseInt(n, 10); if (!v) return ''; const s = ['th', 'st', 'nd', 'rd'], m = v % 100; return v + (s[(m - 20) % 10] || s[m] || s[0]); };
+      const dueLabel = (e) => e.frequency === 'annual'
+        ? ((MONTH_NAMES[(parseInt(e.dueMonth, 10) || 1) - 1] || '') + ' ' + (e.dueDay || '')).trim()
+        : (e.dueDay ? ordinal(e.dueDay) + ' of month' : '—');
+
+      // ---------- derived figures (mirrors the app's own math) ----------
+      const derive = (d) => {
+        const recs = d.records || [], exps = d.expenses || [];
+        const assets = recs.filter(r => r.category === 'Asset');
+        const liabs = recs.filter(r => r.category !== 'Asset');
+        const linked = recs.filter(r => num(r.linkedAssetValue) > 0);
+        const linkedTotal = sum(linked, r => r.linkedAssetValue);
+        const totalAssets = sum(assets, r => r.balance) + linkedTotal;
+        const totalLiabilities = sum(liabs, r => r.balance);
+        const monthlyExpenses = sum(exps, monthlyEquivalent);
+        const income = num(d.monthlyIncome);
+        const liquid = sum(assets.filter(r => /checking|savings/i.test(r.accountType || '')), r => r.balance);
+        return {
+          recs, exps, assets, liabs, linked, linkedTotal, totalAssets, totalLiabilities,
+          netWorth: totalAssets - totalLiabilities, monthlyExpenses, income,
+          cashflow: income - monthlyExpenses, liquid,
+          reserveMonths: monthlyExpenses > 0 ? liquid / monthlyExpenses : null,
+          highApr: liabs.filter(r => num(r.interestRate) >= 10).sort((a, b) => num(b.interestRate) - num(a.interestRate)),
+          idleCash: assets.filter(r => num(r.interestRate) < 2),
+          history: [...(d.networthHistory || [])].sort((a, b) => String(a.date).localeCompare(String(b.date)))
+        };
+      };
+
+      const readiness = (d) => {
+        const recs = d.records || [];
+        const staleDays = d.staleDays || DEFAULT_STALE_DAYS;
+        const withDocs = recs.filter(r => r.documentId).length;
+        const current = recs.filter(r => !getStaleness(r.statementDate, staleDays).isStale).length;
+        const backupAge = d.lastBackupAt ? daysBetween(String(d.lastBackupAt).slice(0, 10)) : null;
+        const backupStale = backupAge === null || backupAge > BACKUP_STALE_DAYS;
+        const items = [
+          { label: 'Executor / handoff notes written', done: String(d.notes || '').trim().length > 0, fix: 'Write instructions in the Continuity Plan tab: where things are kept, who to call first, and what you want done.' },
+          { label: 'At least one key contact added', done: (d.contacts || []).length > 0, fix: 'Add your estate attorney, CPA or advisor under Key Contacts.' },
+          { label: `Accounts with a document on file (${withDocs}/${recs.length})`, done: recs.length > 0 && withDocs === recs.length, fix: 'Upload a statement for each account so there is a source document behind every balance.' },
+          { label: `Accounts with a current statement (${current}/${recs.length})`, done: recs.length > 0 && current === recs.length, fix: `Upload fresh statements — anything older than ${staleDays} days is flagged as out of date.` },
+          { label: backupAge === null ? 'No backup ever exported' : `Backup exported ${backupAge} day(s) ago`, done: !backupStale, fix: 'Export a complete backup from Settings and store it somewhere safe. It is the only recovery copy.' }
+        ];
+        return { items, done: items.filter(i => i.done).length, total: items.length, backupAge, withDocs, current, staleDays };
+      };
+
+      const goalMetrics = (g, d) => {
+        const linked = g.linkedAccountId ? (d.records || []).find(r => r.id === g.linkedAccountId) : null;
+        const current = linked ? num(linked.balance) : num(g.manualCurrentAmount);
+        const isSavings = g.type === 'savings';
+        const history = linked
+          ? (d.accountHistory || []).filter(h => h.accountId === g.linkedAccountId).map(h => ({ date: h.date, value: h.balance }))
+          : (g.manualHistory || []).map(h => ({ date: h.date, value: h.value }));
+        const target = num(g.targetAmount);
+        const starting = (g.startingAmount !== undefined && g.startingAmount !== null) ? num(g.startingAmount) : current;
+        let pct, remaining;
+        if (isSavings) {
+          pct = target > 0 ? Math.min(100, Math.max(0, (current / target) * 100)) : 0;
+          remaining = Math.max(0, target - current);
+        } else {
+          const total = starting - target, paid = starting - current;
+          pct = total > 0 ? Math.min(100, Math.max(0, (paid / total) * 100)) : (current <= target ? 100 : 0);
+          remaining = Math.max(0, current - target);
+        }
+        const projection = estimateGoalCompletion(g.type, current, target, history);
+        const onTrack = projection.date && g.targetDate ? projection.date <= g.targetDate : null;
+        return { linked, current, isSavings, target, pct, remaining, projection, onTrack };
+      };
+
+      // ---------- low-level drawing ----------
+      const setText = (doc, o = {}) => {
+        doc.setFont(o.font || 'helvetica', o.style || 'normal');
+        doc.setFontSize(o.size || 9.5);
+        doc.setTextColor(...(o.color || C.ink));
+      };
+      const gs = (doc, opacity) => doc.setGState(new doc.GState({ opacity }));
+      const pageNo = (ctx) => ctx.doc.getCurrentPageInfo().pageNumber;
+      const addPage = (ctx) => { ctx.doc.addPage(); ctx.y = P.top; };
+      const need = (ctx, h) => { if (ctx.y + h > P.h - P.bottom) addPage(ctx); };
+
+      const create = (opts) => {
+        const jsPDFCtor = window.jspdf.jsPDF;
+        const doc = new jsPDFCtor({ unit: 'mm', format: 'letter', compress: true });
+        doc.setProperties({ title: safe(opts.title), subject: safe(opts.kind || opts.title), author: 'Financial Vault', creator: 'Financial Vault' });
+        const ctx = { doc, y: P.top, opts, sections: [], hasCover: opts.cover !== false, now: new Date() };
+        if (ctx.hasCover) { drawCover(ctx); doc.addPage(); }
+        ctx.y = P.top;
+        return ctx;
+      };
+
+      const drawCover = (ctx) => {
+        const { doc, opts } = ctx;
+        doc.setFillColor(...C.navy); doc.rect(0, 0, P.w, 172, 'F');
+        gs(doc, 0.55);
+        doc.setFillColor(...C.navy2); doc.circle(P.w - 18, 30, 78, 'F'); doc.circle(P.w + 14, 128, 46, 'F');
+        gs(doc, 1);
+        doc.setFillColor(...C.gold); doc.rect(0, 172, P.w, 2.2, 'F');
+
+        // brand mark
+        doc.setFillColor(...C.gold); doc.roundedRect(P.mx, 22, 11, 11, 2, 2, 'F');
+        setText(doc, { style: 'bold', size: 8.5, color: C.navy }); doc.text('FV', P.mx + 5.5, 28.9, { align: 'center' });
+        setText(doc, { style: 'bold', size: 8.5, color: C.white }); doc.text('FINANCIAL VAULT', P.mx + 15, 26.6, { charSpace: 1.6 });
+        setText(doc, { style: 'bold', size: 6, color: C.gold }); doc.text('CAPITAL ALLOCATOR', P.mx + 15, 31, { charSpace: 1.3 });
+
+        // kind + title
+        setText(doc, { style: 'bold', size: 8.5, color: C.gold }); doc.text(safe(opts.kind || 'Report').toUpperCase(), P.mx, 84, { charSpace: 2.2 });
+        setText(doc, { font: 'times', style: 'bold', size: 36, color: C.white });
+        const tl = doc.splitTextToSize(safe(opts.title), CW - 20);
+        let ty = 99;
+        tl.forEach(l => { doc.text(l, P.mx, ty); ty += 15; });
+        doc.setFillColor(...C.gold); doc.rect(P.mx, ty - 7, 24, 1.3, 'F');
+        if (opts.subtitle) {
+          setText(doc, { size: 12, color: [196, 205, 222] });
+          const sl = doc.splitTextToSize(safe(opts.subtitle), 118);
+          doc.text(sl, P.mx, ty + 4, { lineHeightFactor: 1.5 });
+        }
+
+        // prepared for / as of
+        const by = 152;
+        if (opts.owner) {
+          setText(doc, { style: 'bold', size: 6.8, color: C.gold }); doc.text('PREPARED FOR', P.mx, by, { charSpace: 1.4 });
+          setText(doc, { font: 'times', style: 'bold', size: 17, color: C.white }); doc.text(safe(opts.owner), P.mx, by + 8);
+        }
+        const ax = opts.owner ? P.mx + 98 : P.mx;
+        setText(doc, { style: 'bold', size: 6.8, color: C.gold }); doc.text('AS OF', ax, by, { charSpace: 1.4 });
+        setText(doc, { font: 'times', style: 'bold', size: 17, color: C.white }); doc.text(longDate(ctx.now), ax, by + 8);
+
+        // stat strip on the white lower half
+        const stats = (opts.coverStats || []).slice(0, 4);
+        if (stats.length) {
+          const sw = CW / stats.length;
+          stats.forEach((s, i) => {
+            const x = P.mx + i * sw;
+            if (i > 0) { doc.setDrawColor(...C.rule); doc.setLineWidth(0.3); doc.line(x - 3, 192, x - 3, 213); }
+            setText(doc, { style: 'bold', size: 6.2, color: C.muted }); doc.text(safe(s.label).toUpperCase(), x, 194, { charSpace: 0.5 });
+            let size = 21; setText(doc, { font: 'times', style: 'bold', size, color: s.color || C.navy });
+            while (doc.getTextWidth(safe(s.value)) > sw - 7 && size > 11) { size -= 1; doc.setFontSize(size); }
+            doc.text(safe(s.value), x, 205);
+            if (s.sub) { setText(doc, { size: 7.4, color: C.muted }); doc.text(safe(s.sub), x, 210.5); }
+          });
+        }
+
+        // confidentiality + footer
+        doc.setDrawColor(...C.rule); doc.setLineWidth(0.3); doc.line(P.mx, P.h - 50, P.mx + CW, P.h - 50);
+        setText(doc, { style: 'bold', size: 7, color: C.goldDk }); doc.text('CONFIDENTIAL', P.mx, P.h - 43, { charSpace: 1.8 });
+        setText(doc, { size: 8.2, color: C.muted });
+        doc.text(doc.splitTextToSize('This document contains personal financial information. Store it securely and share it only with the people who need it, such as an estate attorney, executor, accountant or advisor.', CW), P.mx, P.h - 37.5, { lineHeightFactor: 1.5 });
+        setText(doc, { size: 7, color: C.faint });
+        doc.text('Generated ' + ctx.now.toLocaleString('en-US', { dateStyle: 'medium', timeStyle: 'short' }) + '  |  Created on-device by Financial Vault', P.mx, P.h - 14);
+      };
+
+      // running header / footer + page numbers, applied once all pages exist
+      const finish = (ctx) => {
+        const { doc, opts } = ctx;
+        const n = doc.getNumberOfPages();
+        for (let i = ctx.hasCover ? 2 : 1; i <= n; i++) {
+          doc.setPage(i);
+          setText(doc, { style: 'bold', size: 6.6, color: C.goldDk }); doc.text('FINANCIAL VAULT', P.mx, 13, { charSpace: 1.4 });
+          setText(doc, { size: 7.4, color: C.muted }); doc.text(safe(opts.title), P.w - P.mx, 13, { align: 'right' });
+          doc.setDrawColor(...C.rule); doc.setLineWidth(0.25); doc.line(P.mx, 16, P.mx + CW, 16);
+          doc.line(P.mx, P.h - 15, P.mx + CW, P.h - 15);
+          setText(doc, { size: 7.2, color: C.faint });
+          doc.text('Confidential' + (opts.owner ? '  |  Prepared for ' + safe(opts.owner) : ''), P.mx, P.h - 10.5);
+          setText(doc, { style: 'bold', size: 7.4, color: C.muted });
+          doc.text(`Page ${i} of ${n}`, P.w - P.mx, P.h - 10.5, { align: 'right' });
+        }
+        doc.setPage(n);
+        return ctx.doc;
+      };
+
+      // ---------- text blocks ----------
+      const h1 = (ctx, text, o = {}) => {
+        need(ctx, o.keep || 38);
+        const { doc } = ctx;
+        if (ctx.y > P.top + 1) ctx.y += 4;
+        doc.setFillColor(...C.gold); doc.rect(P.mx, ctx.y, 11, 1.1, 'F');
+        ctx.y += 4.4;
+        let x = P.mx;
+        if (o.num) {
+          setText(doc, { font: 'times', style: 'bold', size: 17, color: C.gold });
+          doc.text(String(o.num).padStart(2, '0'), x, ctx.y + 6);
+          x += 11;
+        }
+        setText(doc, { font: 'times', style: 'bold', size: 17, color: C.navy });
+        doc.text(safe(text), x, ctx.y + 6);
+        ctx.sections.push({ title: text, page: pageNo(ctx), num: o.num });
+        ctx.y += 9.6;
+        doc.setDrawColor(...C.rule); doc.setLineWidth(0.25); doc.line(P.mx, ctx.y, P.mx + CW, ctx.y);
+        ctx.y += 5;
+        if (o.lead) para(ctx, o.lead, { color: C.muted, size: 9, gap: 4 });
+      };
+
+      const h2 = (ctx, text, o = {}) => {
+        need(ctx, 26);
+        const { doc } = ctx;
+        ctx.y += 2;
+        setText(doc, { style: 'bold', size: 10.5, color: C.navy });
+        doc.text(safe(text), P.mx, ctx.y + 3.4);
+        if (o.note) { setText(doc, { size: 7.6, color: C.muted }); doc.text(safe(o.note), P.mx + CW, ctx.y + 3.4, { align: 'right' }); }
+        ctx.y += 6.2;
+      };
+
+      const para = (ctx, str, o = {}) => {
+        const { doc } = ctx;
+        const size = o.size || 9.5, lh = o.lh || 1.5, w = o.w || CW, x = o.x === undefined ? P.mx : o.x;
+        setText(doc, { size, color: o.color || C.ink, style: o.style || 'normal', font: o.font });
+        const lines = doc.splitTextToSize(safe(str), w);
+        const step = size * PT * lh;
+        lines.forEach(ln => {
+          need(ctx, step);
+          if (o.rule) { doc.setFillColor(...C.gold); doc.rect(x - 4, ctx.y, 0.9, step, 'F'); }
+          setText(doc, { size, color: o.color || C.ink, style: o.style || 'normal', font: o.font });
+          doc.text(ln, x, ctx.y + size * PT * 0.85);
+          ctx.y += step;
+        });
+        ctx.y += (o.gap === undefined ? 2.5 : o.gap);
+      };
+
+      const empty = (ctx, msg) => {
+        need(ctx, 14);
+        const { doc } = ctx;
+        doc.setFillColor(...C.band); doc.roundedRect(P.mx, ctx.y, CW, 11, 1.5, 1.5, 'F');
+        setText(doc, { style: 'italic', size: 8.6, color: C.muted });
+        doc.text(safe(msg), P.mx + 4, ctx.y + 6.8);
+        ctx.y += 15;
+      };
+
+      const callout = (ctx, title, body, o = {}) => {
+        const { doc } = ctx;
+        const tone = { gold: C.gold, red: C.red, green: C.green, amber: C.amber, navy: C.navy }[o.tone || 'gold'];
+        const size = o.size || 9.4, pad = 4.2, step = size * PT * 1.5;
+        setText(doc, { size, style: o.style || 'normal', font: o.font });
+        const lines = doc.splitTextToSize(safe(body), CW - pad * 2 - 2);
+        const h = pad * 2 + (title ? 6 : 0) + lines.length * step;
+        need(ctx, h + 3);
+        const y = ctx.y;
+        doc.setFillColor(...C.band); doc.roundedRect(P.mx, y, CW, h, 1.6, 1.6, 'F');
+        doc.setFillColor(...tone); doc.rect(P.mx, y + 0.6, 1.5, h - 1.2, 'F');
+        let ty = y + pad;
+        if (title) {
+          setText(doc, { style: 'bold', size: 7, color: tone === C.gold ? C.goldDk : tone });
+          doc.text(safe(title).toUpperCase(), P.mx + pad + 2, ty + 2.6, { charSpace: 1.1 });
+          ty += 6;
+        }
+        setText(doc, { size, style: o.style || 'normal', font: o.font, color: o.color || C.ink });
+        lines.forEach((ln, i) => doc.text(ln, P.mx + pad + 2, ty + size * PT * 0.85 + i * step));
+        ctx.y += h + 5;
+      };
+
+      const bullets = (ctx, items, o = {}) => {
+        const { doc } = ctx;
+        const size = o.size || 9.2, step = size * PT * 1.5, w = (o.w || CW) - 6;
+        items.forEach(it => {
+          const text = typeof it === 'string' ? it : it.text;
+          const color = (typeof it === 'object' && it.color) || C.gold;
+          setText(doc, { size });
+          const lines = doc.splitTextToSize(safe(text), w);
+          need(ctx, lines.length * step + 1.5);
+          doc.setFillColor(...color); doc.circle(P.mx + 1.3, ctx.y + step * 0.5, 0.9, 'F');
+          setText(doc, { size, color: C.ink });
+          lines.forEach((ln, i) => doc.text(ln, P.mx + 5, ctx.y + size * PT * 0.85 + i * step));
+          ctx.y += lines.length * step + 1.6;
+        });
+        ctx.y += 2;
+      };
+
+      const checkbox = (doc, x, y, state, size = 3.6) => {
+        // state: true = done (green tick), false = open box, 'warn' = open red box
+        if (state === true) {
+          doc.setFillColor(...C.green); doc.roundedRect(x, y, size, size, 0.6, 0.6, 'F');
+          doc.setDrawColor(...C.white); doc.setLineWidth(0.45);
+          doc.line(x + size * 0.22, y + size * 0.54, x + size * 0.42, y + size * 0.74);
+          doc.line(x + size * 0.42, y + size * 0.74, x + size * 0.8, y + size * 0.28);
+        } else {
+          doc.setDrawColor(...(state === 'warn' ? C.red : C.faint)); doc.setLineWidth(0.4);
+          doc.roundedRect(x, y, size, size, 0.6, 0.6, 'S');
+        }
+      };
+
+      // ---------- tables ----------
+      const table = (ctx, o) => {
+        const { doc } = ctx;
+        need(ctx, 26);
+        doc.autoTable({
+          startY: ctx.y,
+          head: o.head ? [o.head.map(h => safe(h).toUpperCase())] : undefined,
+          body: o.body.map(r => r.map(c => (c && typeof c === 'object' && !Array.isArray(c)) ? { ...c, content: safe(c.content) } : safe(c))),
+          foot: o.foot ? [o.foot.map(c => (c && typeof c === 'object') ? { ...c, content: safe(c.content) } : safe(c))] : undefined,
+          margin: { left: P.mx, right: P.mx, top: P.top, bottom: P.bottom },
+          tableWidth: CW,
+          theme: 'plain',
+          rowPageBreak: 'avoid',
+          styles: { font: 'helvetica', fontSize: o.fontSize || 8.2, cellPadding: { top: 2.1, bottom: 2.1, left: 2.4, right: 2.4 }, textColor: C.ink, overflow: 'linebreak', valign: 'middle', lineWidth: 0 },
+          headStyles: { fillColor: C.navy, textColor: C.white, fontStyle: 'bold', fontSize: 6.6, cellPadding: { top: 2.7, bottom: 2.7, left: 2.4, right: 2.4 } },
+          alternateRowStyles: { fillColor: C.zebra },
+          footStyles: { fillColor: [241, 236, 220], textColor: C.navy, fontStyle: 'bold', fontSize: 8.6 },
+          columnStyles: o.columns || {},
+          didParseCell: (data) => {
+            const cs = (o.columns || {})[data.column.index];
+            if (cs && cs.halign && (data.section === 'head' || data.section === 'foot') && !(data.cell.colSpan > 1)) data.cell.styles.halign = cs.halign;
+            if (o.parseCell) o.parseCell(data);
+          },
+          didDrawCell: (data) => {
+            const c = data.cell;
+            if (data.section === 'body') {
+              doc.setDrawColor(...C.rule); doc.setLineWidth(0.12);
+              doc.line(c.x, c.y + c.height, c.x + c.width, c.y + c.height);
+            } else if (data.section === 'foot') {
+              doc.setDrawColor(...C.gold); doc.setLineWidth(0.5);
+              doc.line(c.x, c.y, c.x + c.width, c.y);
+            }
+            if (o.drawCell) o.drawCell(data);
+          }
+        });
+        ctx.y = doc.lastAutoTable.finalY + (o.after === undefined ? 7 : o.after);
+      };
+
+      // ---------- KPI cards & charts ----------
+      const kpis = (ctx, items) => {
+        const { doc } = ctx;
+        const n = items.length, gap = 4, w = (CW - gap * (n - 1)) / n, h = 24;
+        need(ctx, h + 4);
+        items.forEach((it, i) => {
+          const x = P.mx + i * (w + gap), y = ctx.y;
+          doc.setFillColor(...C.band); doc.roundedRect(x, y, w, h, 1.8, 1.8, 'F');
+          doc.setFillColor(...(it.accent || C.gold)); doc.rect(x + 4, y + 3.4, 7, 0.8, 'F');
+          const lab = safe(it.label).toUpperCase();
+          let ls = 6.2; setText(doc, { style: 'bold', size: ls, color: C.muted });
+          while (doc.getTextWidth(lab) + lab.length * 0.5 > w - 8 && ls > 4.6) { ls -= 0.2; doc.setFontSize(ls); }
+          doc.text(lab, x + 4, y + 9, { charSpace: 0.5 });
+          let size = 15; setText(doc, { style: 'bold', size, color: it.color || C.navy });
+          while (doc.getTextWidth(safe(it.value)) > w - 8 && size > 8.5) { size -= 0.5; doc.setFontSize(size); }
+          doc.text(safe(it.value), x + 4, y + 16.6);
+          if (it.sub) { setText(doc, { size: 6.8, color: it.subColor || C.muted }); doc.text(safe(it.sub), x + 4, y + 21); }
+        });
+        ctx.y += h + 6;
+      };
+
+      const stackBar = (ctx, title, segs, o = {}) => {
+        const { doc } = ctx;
+        const data = segs.filter(s => num(s.value) > 0);
+        const total = sum(data, s => s.value);
+        if (total <= 0) return;
+        const cols = 2, rows = Math.ceil(data.length / cols);
+        need(ctx, 14 + rows * 5.6);
+        setText(doc, { style: 'bold', size: 8.6, color: C.navy }); doc.text(safe(title), P.mx, ctx.y + 3);
+        if (o.note) { setText(doc, { size: 7.6, color: C.muted }); doc.text(safe(o.note), P.mx + CW, ctx.y + 3, { align: 'right' }); }
+        ctx.y += 6;
+        let x = P.mx;
+        data.forEach((s, i) => {
+          const w = (num(s.value) / total) * CW;
+          doc.setFillColor(...(s.color || SERIES[i % SERIES.length])); doc.rect(x, ctx.y, w, 6.2, 'F');
+          x += w;
+        });
+        doc.setDrawColor(...C.white); doc.setLineWidth(0.5);
+        x = P.mx; data.forEach(s => { x += (num(s.value) / total) * CW; if (x < P.mx + CW - 0.5) doc.line(x, ctx.y, x, ctx.y + 6.2); });
+        ctx.y += 10;
+        const colW = CW / cols;
+        data.forEach((s, i) => {
+          const cx = P.mx + (i % cols) * colW, cy = ctx.y + Math.floor(i / cols) * 5.6;
+          doc.setFillColor(...(s.color || SERIES[i % SERIES.length])); doc.roundedRect(cx, cy, 2.8, 2.8, 0.5, 0.5, 'F');
+          setText(doc, { size: 8, color: C.ink }); doc.text(safe(s.label), cx + 4.6, cy + 2.4);
+          setText(doc, { size: 8, color: C.muted, style: 'bold' });
+          doc.text(`${money(s.value, 0)}  (${((num(s.value) / total) * 100).toFixed(0)}%)`, cx + colW - 6, cy + 2.4, { align: 'right' });
+        });
+        ctx.y += rows * 5.6 + 4;
+      };
+
+      const hBars = (ctx, rows, o = {}) => {
+        const { doc } = ctx;
+        const data = rows.filter(r => num(r.value) > 0);
+        if (!data.length) return;
+        const max = Math.max(...data.map(r => num(r.value))), total = sum(data, r => r.value);
+        const labelW = 44, valW = 38, rowH = 7;
+        need(ctx, Math.min(data.length, 4) * rowH + 4);
+        data.forEach((r, i) => {
+          need(ctx, rowH + 1);
+          const y = ctx.y, tx = P.mx + labelW, tw = CW - labelW - valW;
+          setText(doc, { size: 8.4, color: C.ink }); doc.text(safe(r.label), P.mx, y + 4.6);
+          doc.setFillColor(238, 236, 228); doc.roundedRect(tx, y + 1.2, tw, 4, 1, 1, 'F');
+          doc.setFillColor(...(r.color || o.color || SERIES[i % SERIES.length]));
+          doc.roundedRect(tx, y + 1.2, Math.max(1.5, (num(r.value) / max) * tw), 4, 1, 1, 'F');
+          setText(doc, { size: 8.2, style: 'bold', color: C.ink });
+          doc.text(`${money(r.value, 0)}  ${o.noPct ? '' : '(' + ((num(r.value) / total) * 100).toFixed(0) + '%)'}`, P.mx + CW, y + 4.6, { align: 'right' });
+          ctx.y += rowH;
+        });
+        ctx.y += 4;
+      };
+
+      const progress = (doc, x, y, w, pct, color, h = 3) => {
+        doc.setFillColor(232, 229, 219); doc.roundedRect(x, y, w, h, h / 2, h / 2, 'F');
+        if (pct > 0) { doc.setFillColor(...color); doc.roundedRect(x, y, Math.max(h, (Math.min(100, pct) / 100) * w), h, h / 2, h / 2, 'F'); }
+      };
+
+      const lineChart = (ctx, title, pts, o = {}) => {
+        const { doc } = ctx;
+        if (!pts || pts.length < 2) return;
+        const H = o.h || 52, padL = 17, padB = 8, padT = 4;
+        need(ctx, H + 16);
+        setText(doc, { style: 'bold', size: 8.6, color: C.navy }); doc.text(safe(title), P.mx, ctx.y + 3);
+        ctx.y += 6;
+        let data = pts;
+        if (data.length > 70) { const step = (data.length - 1) / 69; data = Array.from({ length: 70 }, (_, i) => pts[Math.round(i * step)]); }
+        const vals = data.map(p => num(p.value));
+        let min = Math.min(...vals, o.target !== undefined ? num(o.target) : Infinity), max = Math.max(...vals, o.target !== undefined ? num(o.target) : -Infinity);
+        if (max === min) { max += 1; min -= 1; }
+        const padV = (max - min) * 0.08; min -= padV; max += padV;
+        const x0 = P.mx + padL, x1 = P.mx + CW - 2, y0 = ctx.y + padT, y1 = ctx.y + H - padB;
+        const X = (i) => x0 + (i / (data.length - 1)) * (x1 - x0);
+        const Y = (v) => y1 - ((v - min) / (max - min)) * (y1 - y0);
+        // grid + y labels
+        doc.setLineWidth(0.12);
+        for (let g = 0; g <= 4; g++) {
+          const gv = min + ((max - min) * g) / 4, gy = Y(gv);
+          doc.setDrawColor(...C.rule); doc.line(x0, gy, x1, gy);
+          setText(doc, { size: 6.6, color: C.faint }); doc.text(moneyShort(gv), x0 - 2, gy + 1.1, { align: 'right' });
+        }
+        const up = vals[vals.length - 1] >= vals[0];
+        const col = o.color || (up ? C.green : C.red);
+        // area
+        gs(doc, 0.13); doc.setFillColor(...col);
+        const rel = []; let px = X(0), py = y1;
+        rel.push([0, Y(vals[0]) - py]); px = X(0); py = Y(vals[0]);
+        for (let i = 1; i < vals.length; i++) { rel.push([X(i) - px, Y(vals[i]) - py]); px = X(i); py = Y(vals[i]); }
+        rel.push([0, y1 - py]);
+        doc.lines(rel, X(0), y1, [1, 1], 'F', true);
+        gs(doc, 1);
+        // line
+        doc.setDrawColor(...col); doc.setLineWidth(0.7); doc.setLineCap('round'); doc.setLineJoin('round');
+        for (let i = 1; i < vals.length; i++) doc.line(X(i - 1), Y(vals[i - 1]), X(i), Y(vals[i]));
+        if (o.target !== undefined) {
+          doc.setDrawColor(...C.gold); doc.setLineWidth(0.3); doc.setLineDashPattern([1.4, 1.2], 0);
+          doc.line(x0, Y(num(o.target)), x1, Y(num(o.target))); doc.setLineDashPattern([], 0);
+        }
+        doc.setFillColor(...col); doc.circle(X(0), Y(vals[0]), 0.9, 'F'); doc.circle(X(vals.length - 1), Y(vals[vals.length - 1]), 1.2, 'F');
+        // x labels
+        setText(doc, { size: 6.8, color: C.muted });
+        doc.text(fmtDate(data[0].date), x0, y1 + 5);
+        doc.text(fmtDate(data[Math.floor((data.length - 1) / 2)].date), (x0 + x1) / 2, y1 + 5, { align: 'center' });
+        doc.text(fmtDate(data[data.length - 1].date), x1, y1 + 5, { align: 'right' });
+        ctx.y += H + 3;
+        const delta = vals[vals.length - 1] - vals[0];
+        setText(doc, { size: 8, style: 'bold', color: col });
+        doc.text(`${delta >= 0 ? '+' : ''}${money(delta, 0)} over this period`, P.mx + CW, ctx.y + 1, { align: 'right' });
+        setText(doc, { size: 8, color: C.muted }); doc.text(`${data.length} snapshots`, P.mx, ctx.y + 1);
+        ctx.y += 7;
+      };
+
+      const signatureBlock = (ctx, title, rows = 2) => {
+        const { doc } = ctx;
+        need(ctx, 12 + rows * 17);
+        h2(ctx, title);
+        for (let r = 0; r < rows; r++) {
+          const y = ctx.y + 11;
+          doc.setDrawColor(...C.faint); doc.setLineWidth(0.25);
+          doc.line(P.mx, y, P.mx + 72, y); doc.line(P.mx + 78, y, P.mx + 120, y); doc.line(P.mx + 126, y, P.mx + CW, y);
+          setText(doc, { size: 6.6, color: C.muted });
+          doc.text('NAME / ROLE', P.mx, y + 3.6, { charSpace: 0.8 }); doc.text('SIGNATURE', P.mx + 78, y + 3.6, { charSpace: 0.8 }); doc.text('DATE', P.mx + 126, y + 3.6, { charSpace: 0.8 });
+          ctx.y += 17;
+        }
+        ctx.y += 2;
+      };
+
+      const ruledLines = (ctx, title, count = 7) => {
+        const { doc } = ctx;
+        need(ctx, 10 + count * 8);
+        h2(ctx, title);
+        doc.setDrawColor(...C.rule); doc.setLineWidth(0.25);
+        for (let i = 0; i < count; i++) { ctx.y += 8; doc.line(P.mx, ctx.y, P.mx + CW, ctx.y); }
+        ctx.y += 6;
+      };
+
+      const disclaimer = (ctx, text) => {
+        need(ctx, 20);
+        ctx.y += 2;
+        para(ctx, text, { size: 7.4, color: C.faint, lh: 1.5 });
+      };
+
+      // contents list with right-aligned page numbers; drawn after layout so page numbers are known
+      const reserveContents = (ctx, count) => {
+        const h = 12 + count * 5.4;
+        need(ctx, h);
+        ctx.contents = { page: pageNo(ctx), y: ctx.y, count };
+        ctx.y += h;
+      };
+      const fillContents = (ctx) => {
+        if (!ctx.contents) return;
+        const { doc } = ctx, c = ctx.contents;
+        doc.setPage(c.page);
+        let y = c.y;
+        setText(doc, { style: 'bold', size: 10.5, color: C.navy }); doc.text('Contents', P.mx, y + 3.4);
+        y += 7;
+        ctx.sections.slice(0, c.count).forEach(s => {
+          setText(doc, { font: 'times', style: 'bold', size: 10, color: C.gold }); if (s.num) doc.text(String(s.num).padStart(2, '0'), P.mx, y + 3);
+          setText(doc, { size: 9.2, color: C.ink }); doc.text(safe(s.title), P.mx + 9, y + 3);
+          const tw = doc.getTextWidth(safe(s.title));
+          doc.setDrawColor(...C.rule); doc.setLineWidth(0.2); doc.setLineDashPattern([0.4, 1.1], 0);
+          doc.line(P.mx + 11 + tw, y + 3, P.mx + CW - 9, y + 3); doc.setLineDashPattern([], 0);
+          setText(doc, { style: 'bold', size: 9.2, color: C.muted }); doc.text(String(s.page), P.mx + CW, y + 3, { align: 'right' });
+          y += 5.4;
+        });
+        doc.setPage(doc.getNumberOfPages());
+      };
+
+      // ============================================================
+      // REPORT BUILDERS
+      // ============================================================
+      const baseOpts = (d, o, kind, title, subtitle, coverStats) => ({
+        kind, title, subtitle, coverStats, owner: (d.owner || '').trim(), cover: o.cover !== false
+      });
+      const acctTypeColor = {};
+      const typeGroups = (recs) => {
+        const m = {};
+        recs.forEach(r => { const k = r.accountType || 'Other'; m[k] = (m[k] || 0) + num(r.balance); });
+        return Object.entries(m).map(([label, value], i) => ({ label, value, color: SERIES[i % SERIES.length] }));
+      };
+
+      // ---- 1. Estate Settlement Package ----
+      const buildSettlement = (d, o = {}) => {
+        const m = derive(d), rd = readiness(d);
+        const ctx = create(baseOpts(d, o, 'Estate Settlement Package', 'Estate & Financial Settlement Package',
+          'A complete, organized record of accounts, obligations, contacts and instructions for an executor or successor.',
+          [
+            { label: 'Net estate value', value: money(m.netWorth, 0), color: m.netWorth < 0 ? C.red : C.navy, sub: 'Assets less liabilities' },
+            { label: 'Total assets', value: money(m.totalAssets, 0), sub: `${m.assets.length} account${m.assets.length === 1 ? '' : 's'}${m.linked.length ? ' + linked assets' : ''}` },
+            { label: 'Total liabilities', value: money(m.totalLiabilities, 0), sub: `${m.liabs.length} account${m.liabs.length === 1 ? '' : 's'}` },
+            { label: 'Monthly obligations', value: money(m.monthlyExpenses, 0), sub: `${m.exps.length} recurring item${m.exps.length === 1 ? '' : 's'}` }
+          ]));
+        const { doc } = ctx;
+        const accountsWithNotes = m.recs.filter(r => r.notes && String(r.notes).trim());
+        const docs = d.documents || [];
+        const plan = ['Executive Summary', 'Executor & Settlement Instructions', 'Key Contacts', 'Statement of Net Estate Value', 'Account Ledger',
+          ...(accountsWithNotes.length ? ['Account Notes & Access'] : []), 'Recurring Obligations',
+          ...(docs.length ? ['Supporting Documents'] : []), ...(m.history.length >= 2 ? ['Net Worth History'] : []), 'Readiness & Record of Review'];
+        let n = 0;
+        const sec = (t, extra = {}) => h1(ctx, t, { num: ++n, ...extra });
+
+        // 01 summary
+        sec('Executive Summary');
+        para(ctx, `Position as of ${longDate(ctx.now)}, based on the most recent statement figures recorded in the vault.`, { color: C.muted, size: 9, gap: 4 });
+        kpis(ctx, [
+          { label: 'Net estate value', value: money(m.netWorth, 0), color: m.netWorth < 0 ? C.red : C.navy, sub: 'Assets less liabilities' },
+          { label: 'Total assets', value: money(m.totalAssets, 0), color: C.green, accent: C.green },
+          { label: 'Total liabilities', value: money(m.totalLiabilities, 0), color: C.red, accent: C.red },
+          { label: 'Monthly obligations', value: money(m.monthlyExpenses, 0), sub: money(m.monthlyExpenses * 12, 0) + ' per year' }
+        ]);
+        const assetSegs = typeGroups(m.assets);
+        if (m.linkedTotal > 0) assetSegs.push({ label: 'Real & other assets', value: m.linkedTotal, color: SERIES[assetSegs.length % SERIES.length] });
+        stackBar(ctx, 'Where the assets are', assetSegs);
+        stackBar(ctx, 'What is owed', typeGroups(m.liabs));
+        h2(ctx, 'Key observations');
+        const staleRecs = m.recs.filter(r => getStaleness(r.statementDate, rd.staleDays).isStale);
+        const obs = [
+          { text: `${m.recs.length} account${m.recs.length === 1 ? '' : 's'} on file: ${m.assets.length} asset and ${m.liabs.length} liability.`, color: C.gold },
+          staleRecs.length
+            ? { text: `${staleRecs.length} statement${staleRecs.length === 1 ? ' is' : 's are'} older than ${rd.staleDays} days (${staleRecs.slice(0, 3).map(r => r.institution).join(', ')}${staleRecs.length > 3 ? ', ...' : ''}). Balances for these may have changed.`, color: C.amber }
+            : { text: `All statements are within ${rd.staleDays} days.`, color: C.green },
+          { text: `${rd.withDocs} of ${m.recs.length} accounts have a source document stored in the vault.`, color: rd.withDocs === m.recs.length && m.recs.length ? C.green : C.amber },
+          m.highApr.length ? { text: `High-interest debt (10%+ APR): ${m.highApr.map(r => `${r.institution} at ${num(r.interestRate)}%`).join('; ')}.`, color: C.red } : null,
+          m.reserveMonths !== null ? { text: `Cash in checking and savings covers about ${m.reserveMonths.toFixed(1)} months of recurring obligations.`, color: m.reserveMonths >= 3 ? C.green : C.amber } : null
+        ].filter(Boolean);
+        bullets(ctx, obs);
+        reserveContents(ctx, plan.length);
+
+        // 02 instructions
+        addPage(ctx);
+        sec('Executor & Settlement Instructions');
+        if (String(d.notes || '').trim()) {
+          para(ctx, 'Written by the account holder:', { size: 8, color: C.muted, gap: 3 });
+          para(ctx, d.notes, { x: P.mx + 5, w: CW - 5, rule: true, size: 9.6, gap: 5 });
+        } else {
+          empty(ctx, 'No executor instructions have been recorded. Add them in the Continuity Plan tab.');
+        }
+
+        // 03 contacts
+        sec('Key Contacts', { lead: 'People and firms to contact first.' });
+        if ((d.contacts || []).length) {
+          table(ctx, {
+            head: ['Name', 'Role', 'Phone', 'Email', 'Notes'],
+            body: d.contacts.map(c => [{ content: c.name || '', styles: { fontStyle: 'bold' } }, c.role || '', c.phone || '', c.email || '', c.notes || '']),
+            columns: { 0: { cellWidth: 32 }, 1: { cellWidth: 28 }, 2: { cellWidth: 27 }, 3: { cellWidth: 52 }, 4: { cellWidth: 'auto' } }
+          });
+        } else empty(ctx, 'No contacts have been added.');
+
+        // 04 net estate statement
+        addPage(ctx);
+        sec('Statement of Net Estate Value');
+        table(ctx, {
+          head: ['Component', 'Detail', 'Amount'],
+          body: [
+            ['Financial assets', `${m.assets.length} account${m.assets.length === 1 ? '' : 's'}`, money(sum(m.assets, r => r.balance))],
+            ['Real & other assets', m.linked.length ? `${m.linked.length} linked asset${m.linked.length === 1 ? '' : 's'}` : 'None recorded', money(m.linkedTotal)],
+            [{ content: 'Total assets', styles: { fontStyle: 'bold' } }, '', { content: money(m.totalAssets), styles: { fontStyle: 'bold' } }],
+            ['Total liabilities', `${m.liabs.length} account${m.liabs.length === 1 ? '' : 's'}`, { content: money(-m.totalLiabilities), styles: { textColor: C.red } }]
+          ],
+          foot: ['Net estate value', 'Assets less liabilities', money(m.netWorth)],
+          columns: { 2: { halign: 'right', cellWidth: 38 } }, after: 8
+        });
+
+        // 05 ledger
+        sec('Account Ledger', { lead: 'Balances are as of each account\'s statement date. Amber dates are older than ' + rd.staleDays + ' days.' });
+        const staleDate = (r) => getStaleness(r.statementDate, rd.staleDays).isStale;
+        const ledgerCols = { 0: { cellWidth: 44 }, 1: { cellWidth: 24 }, 2: { cellWidth: 22 }, 3: { halign: 'right', cellWidth: 15 }, 4: { halign: 'right', cellWidth: 30 }, 5: { cellWidth: 26 }, 6: { halign: 'center', cellWidth: 'auto' } };
+        const ledgerRow = (r) => [{ content: r.institution || '', styles: { fontStyle: 'bold' } }, r.accountType || '', r.accountNumberMasked || '—', num(r.interestRate).toFixed(2) + '%', money(r.balance), r.statementDate ? fmtDate(r.statementDate) : 'Unknown', r.documentId ? 'Yes' : 'No'];
+        const ledgerParse = (rows) => (data) => {
+          if (data.section !== 'body') return;
+          const r = rows[data.row.index]; if (!r) return;
+          if (data.column.index === 5 && staleDate(r)) data.cell.styles.textColor = C.amber;
+          if (data.column.index === 6) data.cell.styles.textColor = r.documentId ? C.green : C.muted;
+        };
+        h2(ctx, 'Assets');
+        if (m.assets.length) table(ctx, { head: ['Institution', 'Type', 'Account #', 'APR', 'Balance', 'Statement', 'Doc'], body: m.assets.map(ledgerRow), foot: ['Total financial assets', '', '', '', money(sum(m.assets, r => r.balance)), '', ''], columns: ledgerCols, parseCell: ledgerParse(m.assets) });
+        else empty(ctx, 'No asset accounts recorded.');
+        if (m.linked.length) {
+          h2(ctx, 'Real & other assets, with equity', { note: 'Value of the asset securing a loan' });
+          table(ctx, {
+            head: ['Asset', 'Secures', 'Estimated value', 'Loan balance', 'Equity'],
+            body: m.linked.map(r => [{ content: r.linkedAssetLabel || 'Asset', styles: { fontStyle: 'bold' } }, r.institution || '', money(r.linkedAssetValue), r.category === 'Asset' ? '—' : money(r.balance), r.category === 'Asset' ? money(r.linkedAssetValue) : money(num(r.linkedAssetValue) - num(r.balance))]),
+            foot: ['Total', '', money(m.linkedTotal), '', money(sum(m.linked, r => num(r.linkedAssetValue) - (r.category === 'Asset' ? 0 : num(r.balance))))],
+            columns: { 2: { halign: 'right' }, 3: { halign: 'right' }, 4: { halign: 'right' } }
+          });
+        }
+        h2(ctx, 'Liabilities');
+        if (m.liabs.length) table(ctx, { head: ['Institution', 'Type', 'Account #', 'APR', 'Balance', 'Statement', 'Doc'], body: m.liabs.map(ledgerRow), foot: ['Total liabilities', '', '', '', money(m.totalLiabilities), '', ''], columns: ledgerCols, parseCell: (data) => { ledgerParse(m.liabs)(data); if (data.section === 'body' && data.column.index === 3 && num(m.liabs[data.row.index].interestRate) >= 10) { data.cell.styles.textColor = C.red; data.cell.styles.fontStyle = 'bold'; } } });
+        else empty(ctx, 'No liability accounts recorded.');
+
+        // 06 notes
+        if (accountsWithNotes.length) {
+          sec('Account Notes & Access', { lead: 'Login locations, who to call and special instructions for specific accounts.' });
+          table(ctx, { head: ['Institution', 'Notes'], body: accountsWithNotes.map(r => [{ content: r.institution || '', styles: { fontStyle: 'bold' } }, r.notes]), columns: { 0: { cellWidth: 48 } } });
+        }
+
+        // 07 obligations
+        sec('Recurring Obligations', { lead: 'Bills and commitments that continue until cancelled. Annual items are shown by their monthly equivalent.' });
+        if (m.exps.length) {
+          const rows = m.exps.map(e => { const nx = nextExpenseOccurrence(e); return { e, nx, du: nx ? daysUntil(nx) : 9999 }; }).sort((a, b) => a.du - b.du);
+          table(ctx, {
+            head: ['Obligation', 'Category', 'Frequency', 'Due', 'Amount', 'Per month'],
+            body: rows.map(({ e, du }) => [{ content: e.name || '', styles: { fontStyle: du <= 14 ? 'bold' : 'normal' } }, e.category || '', e.frequency === 'annual' ? 'Annual' : 'Monthly', dueLabel(e) + (du <= 14 ? `  (in ${du}d)` : ''), money(e.amount), money(monthlyEquivalent(e))]),
+            foot: ['Total', '', '', '', '', money(m.monthlyExpenses)],
+            columns: { 0: { cellWidth: 52 }, 4: { halign: 'right' }, 5: { halign: 'right' } },
+            parseCell: (data) => { if (data.section === 'body' && data.column.index === 3 && rows[data.row.index].du <= 14) data.cell.styles.textColor = C.amber; }
+          });
+          const cats = {}; m.exps.forEach(e => { const k = e.category || 'Other'; cats[k] = (cats[k] || 0) + monthlyEquivalent(e); });
+          h2(ctx, 'By category', { note: 'Monthly equivalent' });
+          hBars(ctx, Object.entries(cats).sort((a, b) => b[1] - a[1]).map(([label, value]) => ({ label, value })));
+        } else empty(ctx, 'No recurring obligations recorded.');
+
+        // 08 documents
+        if (docs.length) {
+          sec('Supporting Documents', { lead: 'Source statements stored inside the vault. They are not printed here; open them in the app or from a backup file.' });
+          table(ctx, {
+            head: ['File', 'Linked account', 'Type', 'Added'],
+            body: docs.map(x => { const r = m.recs.find(a => a.id === x.accountId); return [x.fileName || 'Untitled', r ? r.institution : '—', (x.mimeType || '').split('/').pop().toUpperCase(), x.uploadedAt ? fmtDate(String(x.uploadedAt).slice(0, 10)) : '—']; }),
+            columns: { 0: { cellWidth: 70 } }
+          });
+        }
+
+        // 09 history
+        if (m.history.length >= 2) {
+          sec('Net Worth History', { keep: 90 });
+          lineChart(ctx, 'Net worth over time', m.history.map(h => ({ date: h.date, value: h.netWorth })));
+        }
+
+        // 10 readiness + sign-off
+        sec('Readiness & Record of Review');
+        h2(ctx, `Handoff readiness: ${rd.done} of ${rd.total} complete`);
+        rd.items.forEach(it => {
+          need(ctx, 7);
+          checkbox(doc, P.mx, ctx.y + 0.4, it.done ? true : 'warn');
+          setText(doc, { size: 9.2, color: it.done ? C.ink : C.red, style: it.done ? 'normal' : 'bold' });
+          doc.text(safe(it.label), P.mx + 6, ctx.y + 3.2);
+          ctx.y += 6.6;
+        });
+        ctx.y += 3;
+        signatureBlock(ctx, 'Record of review', 2);
+        disclaimer(ctx, 'This document was compiled from figures entered by the account holder or read from uploaded statements. Balances reflect each account\'s statement date and have not been independently verified. It is an organizational record, not legal, tax or investment advice.');
+
+        fillContents(ctx);
+        return finish(ctx);
+      };
+
+      // ---- 2. Continuity & Handoff Plan ----
+      const buildContinuity = (d, o = {}) => {
+        const m = derive(d), rd = readiness(d);
+        const ctx = create(baseOpts(d, o, 'Continuity Plan', 'Continuity & Handoff Plan',
+          'Everything someone would need to step in and keep things running. Contains no account balances.',
+          [
+            { label: 'Readiness', value: `${rd.done} of ${rd.total}`, color: rd.done === rd.total ? C.green : C.amber, sub: 'Handoff checklist' },
+            { label: 'Accounts', value: String(m.recs.length), sub: 'Institutions on file' },
+            { label: 'Key contacts', value: String((d.contacts || []).length), sub: 'People to call' },
+            { label: 'Recurring bills', value: String(m.exps.length), sub: 'Still being paid' }
+          ]));
+        const { doc } = ctx;
+        let n = 0;
+        const sec = (t, extra = {}) => h1(ctx, t, { num: ++n, ...extra });
+
+        sec('Start Here');
+        para(ctx, 'If you are reading this, you are likely helping someone who cannot manage their finances right now, or you are settling their affairs. This plan lists who to call, where accounts are held and what bills are still running. Work through it in order; you do not need to do everything at once.', { gap: 4 });
+        callout(ctx, 'Before anything else', 'Take your time. Locate the estate attorney listed under Key Contacts and call them first. Avoid closing accounts or making large payments until you have spoken with them.', { tone: 'gold' });
+
+        h2(ctx, `Plan readiness: ${rd.done} of ${rd.total} complete`);
+        progress(doc, P.mx, ctx.y + 1, CW, (rd.done / rd.total) * 100, rd.done === rd.total ? C.green : C.gold, 3.2);
+        ctx.y += 8;
+        rd.items.forEach(it => {
+          const fixLines = it.done ? [] : doc.splitTextToSize(safe(it.fix), CW - 8);
+          need(ctx, 7 + fixLines.length * 4);
+          checkbox(doc, P.mx, ctx.y + 0.4, it.done ? true : 'warn');
+          setText(doc, { size: 9.2, color: it.done ? C.ink : C.red, style: it.done ? 'normal' : 'bold' });
+          doc.text(safe(it.label), P.mx + 6, ctx.y + 3.2);
+          ctx.y += 6;
+          if (fixLines.length) { setText(doc, { size: 8, color: C.muted, style: 'italic' }); doc.text(fixLines, P.mx + 6, ctx.y + 0.6); ctx.y += fixLines.length * 4 + 1.5; }
+        });
+        ctx.y += 3;
+
+        sec('First Steps');
+        const steps = [
+          'Locate this plan and the backup file (see About the Vault Data, below).',
+          'Call the estate attorney or the first contact listed below.',
+          'Read the owner\'s written instructions in full before taking any action.',
+          'Secure paper records, devices and any hardware keys or password manager access.',
+          'Review the recurring bills below so that essential payments (housing, utilities, insurance) continue.',
+          'Contact each institution only after confirming your authority to act, and keep a log of every call.',
+          'Keep copies of all correspondence and statements you receive.'
+        ];
+        steps.forEach((s, i) => {
+          const lines = doc.splitTextToSize(safe(s), CW - 14);
+          need(ctx, lines.length * 4.6 + 2);
+          checkbox(doc, P.mx, ctx.y + 0.5, false);
+          setText(doc, { font: 'times', style: 'bold', size: 10, color: C.gold }); doc.text(String(i + 1), P.mx + 6.4, ctx.y + 3.3);
+          setText(doc, { size: 9.2 }); doc.text(lines, P.mx + 11.5, ctx.y + 3.2);
+          ctx.y += lines.length * 4.6 + 2;
+        });
+        ctx.y += 2;
+
+        addPage(ctx);
+        sec('Owner\'s Instructions');
+        if (String(d.notes || '').trim()) para(ctx, d.notes, { x: P.mx + 5, w: CW - 5, rule: true, size: 9.6, gap: 5 });
+        else empty(ctx, 'No instructions recorded yet. Add them in the Continuity Plan tab.');
+
+        sec('Key Contacts');
+        if ((d.contacts || []).length) {
+          table(ctx, { head: ['Name', 'Role', 'Phone', 'Email', 'Notes'], body: d.contacts.map(c => [{ content: c.name || '', styles: { fontStyle: 'bold' } }, c.role || '', c.phone || '', c.email || '', c.notes || '']), columns: { 0: { cellWidth: 32 }, 1: { cellWidth: 28 }, 2: { cellWidth: 27 }, 3: { cellWidth: 52 } } });
+        } else empty(ctx, 'No contacts recorded. Add an attorney, CPA or advisor.');
+
+        sec('Where Accounts Are Held', { lead: 'Institution, masked account number and any notes on access. Balances are intentionally left out of this plan.' });
+        if (m.recs.length) {
+          const stale = (r) => getStaleness(r.statementDate, rd.staleDays).isStale;
+          table(ctx, {
+            head: ['Institution', 'Type', 'Account #', 'Last statement', 'Notes'],
+            body: m.recs.map(r => [{ content: r.institution || '', styles: { fontStyle: 'bold' } }, r.accountType || '', r.accountNumberMasked || '—', r.statementDate ? fmtDate(r.statementDate) : 'Unknown', r.notes || '']),
+            columns: { 0: { cellWidth: 40 }, 1: { cellWidth: 24 }, 2: { cellWidth: 24 }, 3: { cellWidth: 28 } },
+            parseCell: (data) => { if (data.section === 'body' && data.column.index === 3 && stale(m.recs[data.row.index])) data.cell.styles.textColor = C.amber; }
+          });
+        } else empty(ctx, 'No accounts recorded.');
+
+        sec('Bills That Keep Running', { lead: 'Ordered by next due date.' });
+        if (m.exps.length) {
+          const rows = m.exps.map(e => { const nx = nextExpenseOccurrence(e); return { e, du: nx ? daysUntil(nx) : 9999 }; }).sort((a, b) => a.du - b.du);
+          table(ctx, {
+            head: ['Bill', 'Category', 'Due', 'Amount', 'Frequency'],
+            body: rows.map(({ e }) => [{ content: e.name || '', styles: { fontStyle: 'bold' } }, e.category || '', dueLabel(e), money(e.amount), e.frequency === 'annual' ? 'Annual' : 'Monthly']),
+            foot: ['Monthly total', '', '', money(m.monthlyExpenses), ''],
+            columns: { 0: { cellWidth: 56 }, 3: { halign: 'right' } }
+          });
+        } else empty(ctx, 'No recurring bills recorded.');
+
+        sec('About the Vault Data');
+        para(ctx, `Financial Vault stores everything on the owner's device only; there is no online account to log in to. ${rd.backupAge === null ? 'No backup has been exported yet.' : `The last complete backup was exported ${rd.backupAge} day(s) ago.`} A backup file is the only way to recover the data if the device is lost. Ask the owner, or check the contacts above, to find out where it is stored.`, { gap: 4 });
+        ruledLines(ctx, 'Where the backup and other records are kept (write in)', 6);
+        disclaimer(ctx, 'This plan is an organizational aid prepared from information entered by the owner. It is not legal advice and does not confer authority to act on anyone\'s accounts.');
+        return finish(ctx);
+      };
+
+      // ---- 3. Personal Net Worth Statement ----
+      const buildNetWorth = (d, o = {}) => {
+        const m = derive(d);
+        const ctx = create(baseOpts(d, o, 'Personal Financial Statement', 'Net Worth Statement',
+          'A statement of assets, liabilities and net worth with key financial ratios.',
+          [
+            { label: 'Net worth', value: money(m.netWorth, 0), color: m.netWorth < 0 ? C.red : C.navy },
+            { label: 'Total assets', value: money(m.totalAssets, 0) },
+            { label: 'Total liabilities', value: money(m.totalLiabilities, 0) },
+            { label: 'Debt to assets', value: m.totalAssets > 0 ? pctStr((m.totalLiabilities / m.totalAssets) * 100) : 'n/a' }
+          ]));
+        const { doc } = ctx;
+        let n = 0; const sec = (t, e = {}) => h1(ctx, t, { num: ++n, ...e });
+        sec('Summary');
+        para(ctx, `Prepared ${longDate(ctx.now)} from the most recent statement for each account.`, { color: C.muted, size: 9, gap: 4 });
+        kpis(ctx, [
+          { label: 'Net worth', value: money(m.netWorth, 0), color: m.netWorth < 0 ? C.red : C.navy },
+          { label: 'Total assets', value: money(m.totalAssets, 0), color: C.green, accent: C.green },
+          { label: 'Total liabilities', value: money(m.totalLiabilities, 0), color: C.red, accent: C.red },
+          { label: 'Liquid cash', value: money(m.liquid, 0), sub: m.reserveMonths !== null ? m.reserveMonths.toFixed(1) + ' months of bills' : '' }
+        ]);
+        const segs = typeGroups(m.assets); if (m.linkedTotal > 0) segs.push({ label: 'Real & other assets', value: m.linkedTotal, color: SERIES[segs.length % SERIES.length] });
+        stackBar(ctx, 'Asset mix', segs);
+        stackBar(ctx, 'Liability mix', typeGroups(m.liabs));
+        if (m.history.length >= 2) lineChart(ctx, 'Net worth trend', m.history.map(h => ({ date: h.date, value: h.netWorth })));
+
+        addPage(ctx);
+        sec('Statement of Financial Position');
+        const group = (title, recs, extraLinked) => {
+          const by = {};
+          recs.forEach(r => { const k = r.accountType || 'Other'; (by[k] = by[k] || []).push(r); });
+          const rows = [];
+          rows.push([{ content: title, colSpan: 3, styles: { fillColor: C.navy2, textColor: C.white, fontStyle: 'bold', fontSize: 7.4 } }]);
+          Object.entries(by).forEach(([k, list]) => {
+            rows.push([{ content: k, colSpan: 3, styles: { fontStyle: 'bold', textColor: C.goldDk, fillColor: C.band } }]);
+            list.forEach(r => rows.push([{ content: '   ' + (r.institution || ''), styles: {} }, r.statementDate ? fmtDate(r.statementDate) : '—', money(r.balance)]));
+          });
+          if (extraLinked && m.linked.length) {
+            rows.push([{ content: 'Real & other assets', colSpan: 3, styles: { fontStyle: 'bold', textColor: C.goldDk, fillColor: C.band } }]);
+            m.linked.forEach(r => rows.push([{ content: '   ' + (r.linkedAssetLabel || 'Asset') + ' (' + (r.institution || '') + ')', styles: {} }, 'Estimate', money(r.linkedAssetValue)]));
+          }
+          return rows;
+        };
+        table(ctx, {
+          head: ['Item', 'As of', 'Amount'],
+          body: [
+            ...group('ASSETS', m.assets, true),
+            [{ content: 'Total assets', colSpan: 2, styles: { fontStyle: 'bold', fillColor: [241, 236, 220] } }, { content: money(m.totalAssets), styles: { fontStyle: 'bold', fillColor: [241, 236, 220] } }],
+            ...group('LIABILITIES', m.liabs, false),
+            [{ content: 'Total liabilities', colSpan: 2, styles: { fontStyle: 'bold', fillColor: [241, 236, 220] } }, { content: money(m.totalLiabilities), styles: { fontStyle: 'bold', fillColor: [241, 236, 220] } }]
+          ],
+          foot: ['NET WORTH', '', money(m.netWorth)],
+          columns: { 1: { cellWidth: 32 }, 2: { halign: 'right', cellWidth: 38 } },
+          parseCell: (data) => { if (data.section === 'body') data.cell.styles.fillColor = data.cell.styles.fillColor || [255, 255, 255]; }
+        });
+
+        sec('Key Ratios');
+        table(ctx, {
+          head: ['Measure', 'Value', 'What it tells you'],
+          body: [
+            ['Debt to assets', m.totalAssets > 0 ? pctStr((m.totalLiabilities / m.totalAssets) * 100, 1) : 'n/a', 'Share of everything owned that is financed by debt. Lower is stronger.'],
+            ['Liquid cash', money(m.liquid, 0), 'Checking and savings balances available immediately.'],
+            ['Months of bills covered', m.reserveMonths !== null ? m.reserveMonths.toFixed(1) : 'n/a', 'Liquid cash divided by monthly recurring obligations. Three or more is a common target.'],
+            ['Monthly income', money(m.income, 0), 'As entered in the Budget tab.'],
+            ['Monthly obligations', money(m.monthlyExpenses, 0), 'Recurring bills, annual items averaged monthly.'],
+            ['Monthly cash flow', money(m.cashflow, 0), 'Income less recurring obligations.']
+          ],
+          columns: { 0: { cellWidth: 46, fontStyle: 'bold' }, 1: { cellWidth: 30, halign: 'right' } },
+          parseCell: (data) => { if (data.section === 'body' && data.row.index === 5 && data.column.index === 1) data.cell.styles.textColor = m.cashflow < 0 ? C.red : C.green; }
+        });
+
+        sec('Capital Allocation Observations');
+        const obs = [];
+        if (m.highApr.length) obs.push({ text: `Debt at 10% APR or higher totals ${money(sum(m.highApr, r => r.balance), 0)} across ${m.highApr.length} account${m.highApr.length === 1 ? '' : 's'}; the highest rate is ${m.highApr[0].institution} at ${num(m.highApr[0].interestRate)}%. Directing spare cash flow to the highest rate first (the avalanche method) minimizes interest paid.`, color: C.red });
+        else obs.push({ text: 'No debts at 10% APR or higher were found.', color: C.green });
+        if (m.idleCash.length) {
+          const idle = sum(m.idleCash, r => r.balance), reserve = m.monthlyExpenses * 3;
+          obs.push({ text: `${money(idle, 0)} sits in accounts yielding under 2%. A three-month reserve of recurring obligations is ${money(reserve, 0)}${idle > reserve ? `, so about ${money(idle - reserve, 0)} may be able to work harder in a higher-yield account` : ''}.`, color: C.gold });
+        } else obs.push({ text: 'No low-yield cash balances were found.', color: C.green });
+        bullets(ctx, obs);
+        disclaimer(ctx, 'These observations are arithmetic on the figures recorded in the vault and are not personalized investment, tax or legal advice.');
+        return finish(ctx);
+      };
+
+      // ---- 4. Budget & Cash Flow ----
+      const buildBudget = (d, o = {}) => {
+        const m = derive(d);
+        const rate = m.income > 0 ? (m.cashflow / m.income) * 100 : null;
+        const ctx = create(baseOpts(d, o, 'Budget Report', 'Budget & Cash Flow Report', 'Monthly income, recurring obligations and what is left over.',
+          [
+            { label: 'Monthly income', value: money(m.income, 0) },
+            { label: 'Obligations', value: money(m.monthlyExpenses, 0), sub: 'Per month' },
+            { label: 'Net cash flow', value: money(m.cashflow, 0), color: m.cashflow < 0 ? C.red : C.green, sub: 'Per month' },
+            { label: 'Savings rate', value: rate === null ? 'n/a' : pctStr(rate, 0), sub: 'Of income' }
+          ]));
+        const { doc } = ctx;
+        let n = 0; const sec = (t, e = {}) => h1(ctx, t, { num: ++n, ...e });
+        sec('Cash Flow Summary');
+        kpis(ctx, [
+          { label: 'Monthly income', value: money(m.income, 0) },
+          { label: 'Obligations', value: money(m.monthlyExpenses, 0), sub: money(m.monthlyExpenses * 12, 0) + ' per year', color: C.red, accent: C.red },
+          { label: 'Net cash flow', value: money(m.cashflow, 0), color: m.cashflow < 0 ? C.red : C.green, accent: m.cashflow < 0 ? C.red : C.green },
+          { label: 'Savings rate', value: rate === null ? 'n/a' : pctStr(rate, 0), sub: 'Of income' }
+        ]);
+        if (m.income > 0 && m.exps.length) {
+          const spent = Math.min(100, (m.monthlyExpenses / m.income) * 100);
+          setText(doc, { size: 8.6, style: 'bold', color: C.navy }); doc.text(`${spent.toFixed(0)}% of income is committed to recurring obligations`, P.mx, ctx.y + 3);
+          ctx.y += 6; progress(doc, P.mx, ctx.y, CW, spent, spent > 85 ? C.red : spent > 65 ? C.amber : C.green, 4); ctx.y += 11;
+        }
+        if (m.cashflow < 0) callout(ctx, 'Shortfall', `Recurring obligations exceed monthly income by ${money(-m.cashflow, 0)}. Review the largest categories below.`, { tone: 'red' });
+        const cats = {}; m.exps.forEach(e => { const k = e.category || 'Other'; cats[k] = (cats[k] || 0) + monthlyEquivalent(e); });
+        sec('Spending by Category', { lead: 'Monthly equivalent of every recurring item; annual bills are divided by twelve.' });
+        if (m.exps.length) hBars(ctx, Object.entries(cats).sort((a, b) => b[1] - a[1]).map(([label, value]) => ({ label, value })));
+        else empty(ctx, 'No recurring obligations recorded.');
+
+        sec('Obligation Detail');
+        if (m.exps.length) {
+          const order = Object.keys(cats).sort((a, b) => cats[b] - cats[a]);
+          const body = [];
+          order.forEach(cat => {
+            body.push([{ content: cat, colSpan: 4, styles: { fontStyle: 'bold', textColor: C.goldDk, fillColor: C.band } }, { content: money(cats[cat]), styles: { fontStyle: 'bold', textColor: C.goldDk, fillColor: C.band, halign: 'right' } }]);
+            m.exps.filter(e => (e.category || 'Other') === cat).forEach(e => body.push([{ content: '   ' + (e.name || ''), styles: {} }, e.frequency === 'annual' ? 'Annual' : 'Monthly', dueLabel(e), money(e.amount), money(monthlyEquivalent(e))]));
+          });
+          table(ctx, { head: ['Obligation', 'Frequency', 'Due', 'Amount', 'Per month'], body, foot: ['Total', '', '', '', money(m.monthlyExpenses)], columns: { 0: { cellWidth: 62 }, 3: { halign: 'right' }, 4: { halign: 'right' } } });
+        } else empty(ctx, 'Nothing to list yet.');
+
+        const upcoming = m.exps.map(e => { const nx = nextExpenseOccurrence(e); return { e, nx, du: nx ? daysUntil(nx) : 9999 }; }).filter(x => x.du <= 30).sort((a, b) => a.du - b.du);
+        sec('Due in the Next 30 Days');
+        if (upcoming.length) {
+          table(ctx, { head: ['Bill', 'Due date', 'In', 'Amount'], body: upcoming.map(({ e, nx, du }) => [{ content: e.name || '', styles: { fontStyle: 'bold' } }, fmtDate(nx), du === 0 ? 'Today' : du + ' day' + (du === 1 ? '' : 's'), money(e.amount)]), foot: ['Total due', '', '', money(sum(upcoming, x => x.e.amount))], columns: { 3: { halign: 'right' } } });
+        } else empty(ctx, 'Nothing is due in the next 30 days.');
+        disclaimer(ctx, 'Income is the figure entered in the Budget tab. Only recurring obligations recorded in the vault are included; irregular spending is not reflected.');
+        return finish(ctx);
+      };
+
+      // ---- 5. Goals Progress ----
+      const buildGoals = (d, o = {}) => {
+        const goals = d.goals || [];
+        const gm = goals.map(g => ({ g, k: goalMetrics(g, d) }));
+        const reached = gm.filter(x => x.k.projection.reached).length;
+        const avg = gm.length ? gm.reduce((s, x) => s + x.k.pct, 0) / gm.length : 0;
+        const ctx = create(baseOpts(d, o, 'Goals Report', 'Goals Progress Report', 'Savings targets and debt payoff goals, with projected completion.',
+          [
+            { label: 'Goals', value: String(goals.length) },
+            { label: 'Reached', value: String(reached), color: C.green },
+            { label: 'Average progress', value: pctStr(avg, 0) },
+            { label: 'Remaining to go', value: money(sum(gm, x => x.k.remaining), 0) }
+          ]));
+        const { doc } = ctx;
+        let n = 0; const sec = (t, e = {}) => h1(ctx, t, { num: ++n, ...e });
+        sec('Overview', { lead: `Status as of ${longDate(ctx.now)}.` });
+        if (!goals.length) { empty(ctx, 'No goals have been created yet.'); return finish(ctx); }
+        table(ctx, {
+          head: ['Goal', 'Type', 'Current', 'Target', 'Progress', 'Target date'],
+          body: gm.map(({ g, k }) => [{ content: g.name || '', styles: { fontStyle: 'bold' } }, k.isSavings ? 'Savings' : 'Debt payoff', money(k.current, 0), money(k.target, 0), pctStr(k.pct, 0), g.targetDate ? fmtDate(g.targetDate) : '—']),
+          columns: { 2: { halign: 'right' }, 3: { halign: 'right' }, 4: { halign: 'right', cellWidth: 20 } }
+        });
+        sec('Goal Detail');
+        gm.forEach(({ g, k }) => {
+          const col = k.isSavings ? C.green : C.blue;
+          const projLines = doc.splitTextToSize(safe(k.projection.text), CW - 10);
+          const h = 31 + projLines.length * 4;
+          need(ctx, h + 4);
+          const y = ctx.y;
+          doc.setFillColor(...C.band); doc.roundedRect(P.mx, y, CW, h, 1.8, 1.8, 'F');
+          doc.setFillColor(...col); doc.rect(P.mx, y + 0.7, 1.5, h - 1.4, 'F');
+          setText(doc, { font: 'times', style: 'bold', size: 12.5, color: C.navy }); doc.text(safe(g.name), P.mx + 6, y + 7.5);
+          setText(doc, { style: 'bold', size: 6.4, color: col }); doc.text((k.isSavings ? 'SAVINGS' : 'DEBT PAYOFF') + (k.linked ? '  |  LINKED TO ' + safe(k.linked.institution).toUpperCase() : ''), P.mx + 6, y + 12, { charSpace: 0.8 });
+          setText(doc, { style: 'bold', size: 15, color: col }); doc.text(pctStr(k.pct, 0), P.mx + CW - 5, y + 9, { align: 'right' });
+          progress(doc, P.mx + 6, y + 15, CW - 12, k.pct, col, 3.4);
+          const cols = [['Current', money(k.current, 0)], ['Target', money(k.target, 0)], ['Remaining', money(k.remaining, 0)], ['Target date', g.targetDate ? fmtDate(g.targetDate) : 'None set']];
+          cols.forEach(([l, v], i) => {
+            const cx = P.mx + 6 + i * ((CW - 12) / 4);
+            setText(doc, { style: 'bold', size: 6, color: C.muted }); doc.text(l.toUpperCase(), cx, y + 23, { charSpace: 0.7 });
+            setText(doc, { style: 'bold', size: 9.4, color: C.ink }); doc.text(safe(v), cx, y + 27.6);
+          });
+          setText(doc, { size: 8.2, color: k.onTrack === false ? C.amber : C.muted, style: 'italic' });
+          doc.text(projLines, P.mx + 6, y + 33.2);
+          ctx.y += h + 4;
+        });
+        disclaimer(ctx, 'Projections extend the recent balance trend in a straight line and are estimates only.');
+        return finish(ctx);
+      };
+
+      // ---- 6. Wealth Strategy ----
+      const buildStrategy = (d, o = {}) => {
+        const r = d.strategyReport || {};
+        const m = derive(d);
+        const ctx = create(baseOpts(d, o, 'Wealth Strategy Report', 'Wealth Strategy Report', 'An AI-assisted review of strengths, risks and strategies to consider.',
+          [
+            { label: 'Net worth', value: money(m.netWorth, 0), color: m.netWorth < 0 ? C.red : C.navy },
+            { label: 'Monthly cash flow', value: money(m.cashflow, 0), color: m.cashflow < 0 ? C.red : C.green },
+            { label: 'Strategies', value: String((r.strategies || []).length) },
+            { label: 'Generated', value: r.generatedAt ? fmtDate(new Date(r.generatedAt)) : '—' }
+          ]));
+        const { doc } = ctx;
+        let n = 0; const sec = (t, e = {}) => h1(ctx, t, { num: ++n, ...e });
+        sec('Overview');
+        kpis(ctx, [
+          { label: 'Net worth', value: money(m.netWorth, 0), color: m.netWorth < 0 ? C.red : C.navy },
+          { label: 'Total assets', value: money(m.totalAssets, 0), color: C.green, accent: C.green },
+          { label: 'Total liabilities', value: money(m.totalLiabilities, 0), color: C.red, accent: C.red },
+          { label: 'Monthly cash flow', value: money(m.cashflow, 0), color: m.cashflow < 0 ? C.red : C.green }
+        ]);
+        if (r.headline) callout(ctx, 'Summary', r.headline, { tone: 'gold', font: 'times', size: 11.2, style: 'normal' });
+
+        // strengths / risks side by side when they fit, otherwise stacked
+        const col = (title, items, color) => ({ title, items: (items || []).map(safe), color });
+        const L = col('Strengths', r.strengths, C.green), R = col('Risks', r.risks, C.red);
+        const colW = (CW - 8) / 2, size = 8.8, step = size * PT * 1.5;
+        setText(doc, { size });
+        const measure = (c) => c.items.reduce((h, t) => h + doc.splitTextToSize(t, colW - 7).length * step + 2, 0) + 12;
+        if (L.items.length || R.items.length) {
+          const hh = Math.max(measure(L), measure(R));
+          if (hh < 120) {
+            need(ctx, hh + 4);
+            [L, R].forEach((c, i) => {
+              const x = P.mx + i * (colW + 8); let y = ctx.y;
+              doc.setFillColor(...C.band); doc.roundedRect(x, y, colW, hh, 1.8, 1.8, 'F');
+              doc.setFillColor(...c.color); doc.rect(x + 4, y + 3.4, 7, 0.8, 'F');
+              setText(doc, { style: 'bold', size: 7.4, color: c.color }); doc.text(c.title.toUpperCase(), x + 4, y + 9.4, { charSpace: 1 });
+              y += 12.5;
+              c.items.forEach(t => {
+                const ls = doc.splitTextToSize(t, colW - 9);
+                doc.setFillColor(...c.color); doc.circle(x + 5, y + step * 0.45, 0.8, 'F');
+                setText(doc, { size, color: C.ink }); doc.text(ls, x + 8, y + size * PT * 0.85, { lineHeightFactor: 1.5 });
+                y += ls.length * step + 2;
+              });
+            });
+            ctx.y += hh + 7;
+          } else {
+            [L, R].forEach(c => { if (c.items.length) { h2(ctx, c.title); bullets(ctx, c.items.map(t => ({ text: t, color: c.color }))); } });
+          }
+        }
+
+        sec('Strategies to Consider');
+        const prio = { high: [C.red, 'HIGH'], medium: [C.amber, 'MEDIUM'], low: [C.muted, 'LOW'] };
+        (r.strategies || []).forEach((s, i) => {
+          const [pc, plabel] = prio[(s.priority || 'medium').toLowerCase()] || prio.medium;
+          const w = CW - 12, sz = 8.6, st = sz * PT * 1.5;
+          setText(doc, { size: sz });
+          const rat = s.rationale ? doc.splitTextToSize(safe(s.rationale), w) : [];
+          setText(doc, { size: sz, style: 'bold' });
+          const act = s.action ? doc.splitTextToSize('Action: ' + safe(s.action), w) : [];
+          setText(doc, { size: 8.2 });
+          const imp = s.estimatedImpact ? doc.splitTextToSize('Estimated impact: ' + safe(s.estimatedImpact), w) : [];
+          const h = 14 + (rat.length + act.length + imp.length) * st + (act.length ? 1.5 : 0) + (imp.length ? 1 : 0);
+          need(ctx, h + 4);
+          const y = ctx.y;
+          doc.setFillColor(...C.band); doc.roundedRect(P.mx, y, CW, h, 1.8, 1.8, 'F');
+          doc.setFillColor(...pc); doc.rect(P.mx, y + 0.7, 1.5, h - 1.4, 'F');
+          setText(doc, { font: 'times', style: 'bold', size: 11.5, color: C.gold }); doc.text(String(i + 1).padStart(2, '0'), P.mx + 6, y + 8);
+          setText(doc, { style: 'bold', size: 10.2, color: C.navy });
+          const tl = doc.splitTextToSize(safe(s.title || ''), CW - 52);
+          doc.text(tl[0] || '', P.mx + 16, y + 8);
+          // priority pill
+          doc.setFillColor(...pc); doc.roundedRect(P.mx + CW - 25, y + 3.4, 20, 5.4, 2.7, 2.7, 'F');
+          setText(doc, { style: 'bold', size: 6.2, color: C.white }); doc.text(plabel, P.mx + CW - 15, y + 7.1, { align: 'center', charSpace: 0.7 });
+          let ty = y + 13.5;
+          setText(doc, { size: sz, color: C.ink }); doc.text(rat, P.mx + 6, ty, { lineHeightFactor: 1.5 }); ty += rat.length * st;
+          if (act.length) { ty += 1.5; setText(doc, { size: sz, style: 'bold', color: C.green }); doc.text(act, P.mx + 6, ty, { lineHeightFactor: 1.5 }); ty += act.length * st; }
+          if (imp.length) { ty += 1; setText(doc, { size: 8.2, style: 'italic', color: C.muted }); doc.text(imp, P.mx + 6, ty, { lineHeightFactor: 1.5 }); }
+          ctx.y += h + 4;
+        });
+        if (r.cashflowNotes) { sec('Cashflow Notes'); para(ctx, r.cashflowNotes, { size: 9.4, gap: 4 }); }
+        disclaimer(ctx, 'This report was generated by an AI model from the figures stored in the vault. It is informational only, may contain errors, and is not personalized investment, tax or legal advice. Verify any decision with a qualified professional.');
+        return finish(ctx);
+      };
+
+      // ============================================================
+      // EXCEL WORKBOOK
+      // ============================================================
+      const buildWorkbook = (d) => {
+        const m = derive(d), wb = XLSX.utils.book_new();
+        const addSheet = (name, rows, widths, moneyCols = [], pctCols = []) => {
+          const ws = XLSX.utils.aoa_to_sheet(rows);
+          ws['!cols'] = widths.map(w => ({ wch: w }));
+          const range = XLSX.utils.decode_range(ws['!ref'] || 'A1');
+          for (let r = 1; r <= range.e.r; r++) {
+            moneyCols.forEach(c => { const cell = ws[XLSX.utils.encode_cell({ r, c })]; if (cell && typeof cell.v === 'number') cell.z = '$#,##0.00;[Red]-$#,##0.00'; });
+            pctCols.forEach(c => { const cell = ws[XLSX.utils.encode_cell({ r, c })]; if (cell && typeof cell.v === 'number') cell.z = '0.00"%"'; });
+          }
+          ws['!freeze'] = { xSplit: 0, ySplit: 1 };
+          XLSX.utils.book_append_sheet(wb, ws, name);
+        };
+        addSheet('Summary', [['Measure', 'Value'], ['Prepared', new Date().toISOString().slice(0, 10)], ['Total assets', m.totalAssets], ['Total liabilities', m.totalLiabilities], ['Net worth', m.netWorth], ['Monthly income', m.income], ['Monthly obligations', m.monthlyExpenses], ['Monthly cash flow', m.cashflow], ['Liquid cash', m.liquid]], [26, 18], [1]);
+        const sm = XLSX.utils.decode_range(wb.Sheets['Summary']['!ref']);
+        for (let r = 2; r <= sm.e.r; r++) { const c = wb.Sheets['Summary'][XLSX.utils.encode_cell({ r, c: 1 })]; if (c) c.z = '$#,##0.00;[Red]-$#,##0.00'; }
+        addSheet('Accounts', [['Institution', 'Type', 'Category', 'Account #', 'APR %', 'Balance', 'Linked asset', 'Linked asset value', 'Equity', 'Statement date', 'Document on file', 'Notes'],
+          ...m.recs.map(r => [r.institution || '', r.accountType || '', r.category === 'Asset' ? 'Asset' : 'Liability', r.accountNumberMasked || '', num(r.interestRate), num(r.balance), r.linkedAssetLabel || '', num(r.linkedAssetValue) || '', num(r.linkedAssetValue) > 0 ? num(r.linkedAssetValue) - (r.category === 'Asset' ? 0 : num(r.balance)) : '', r.statementDate || '', r.documentId ? 'Yes' : 'No', r.notes || ''])],
+          [24, 14, 11, 14, 8, 15, 20, 18, 15, 14, 14, 40], [5, 7, 8], [4]);
+        addSheet('Budget', [['Obligation', 'Category', 'Frequency', 'Due', 'Amount', 'Per month'],
+          ...m.exps.map(e => [e.name || '', e.category || '', e.frequency === 'annual' ? 'Annual' : 'Monthly', dueLabel(e), num(e.amount), monthlyEquivalent(e)])], [30, 18, 11, 16, 14, 14], [4, 5]);
+        addSheet('Goals', [['Goal', 'Type', 'Linked account', 'Current', 'Target', 'Remaining', 'Progress %', 'Target date', 'Projection'],
+          ...(d.goals || []).map(g => { const k = goalMetrics(g, d); return [g.name || '', k.isSavings ? 'Savings' : 'Debt payoff', k.linked ? k.linked.institution : 'Manual', k.current, k.target, k.remaining, Math.round(k.pct * 10) / 10, g.targetDate || '', k.projection.text]; })], [26, 12, 20, 14, 14, 14, 11, 12, 50], [3, 4, 5], [6]);
+        addSheet('Contacts', [['Name', 'Role', 'Phone', 'Email', 'Notes'], ...(d.contacts || []).map(c => [c.name || '', c.role || '', c.phone || '', c.email || '', c.notes || ''])], [24, 20, 16, 28, 40]);
+        addSheet('Net worth history', [['Date', 'Net worth'], ...m.history.map(h => [h.date, num(h.netWorth)])], [14, 16], [1]);
+        return wb;
+      };
+
+      // ============================================================
+      // REGISTRY
+      // ============================================================
+      const REPORTS = [
+        { id: 'settlement', title: 'Estate Settlement Package', desc: 'The complete executor file: summary, instructions, contacts, ledger, obligations, documents and sign-off page.', icon: 'file-text', file: 'Estate_Settlement_Package', build: buildSettlement },
+        { id: 'continuity', title: 'Continuity & Handoff Plan', desc: 'A step-by-step guide for whoever steps in: first steps, contacts, where accounts are held, bills. No balances.', icon: 'life-buoy', file: 'Continuity_Plan', build: buildContinuity },
+        { id: 'networth', title: 'Net Worth Statement', desc: 'Assets, liabilities and net worth in statement format, with ratios and allocation observations.', icon: 'landmark', file: 'Net_Worth_Statement', build: buildNetWorth },
+        { id: 'budget', title: 'Budget & Cash Flow Report', desc: 'Income against recurring obligations, spending by category and bills due in the next 30 days.', icon: 'pie-chart', file: 'Budget_Cash_Flow_Report', build: buildBudget },
+        { id: 'goals', title: 'Goals Progress Report', desc: 'Every savings and debt payoff goal with progress bars and projected completion.', icon: 'target', file: 'Goals_Progress_Report', build: buildGoals },
+        { id: 'strategy', title: 'Wealth Strategy Report', desc: 'The AI strategy report, laid out as a formal document. Generate it in the Strategy tab first.', icon: 'sparkles', file: 'Wealth_Strategy_Report', build: buildStrategy, needs: 'strategyReport' }
+      ];
+
+      const localStamp = () => { const n = new Date(); return n.getFullYear() + '-' + String(n.getMonth() + 1).padStart(2, '0') + '-' + String(n.getDate()).padStart(2, '0'); };
+
+      const make = (id, d, o = {}) => {
+        const rep = REPORTS.find(r => r.id === id);
+        if (!rep) throw new Error('Unknown report: ' + id);
+        const doc = rep.build(d, o);
+        return { doc, filename: `${rep.file}_${localStamp()}.pdf`, title: rep.title };
+      };
+
+      return { REPORTS, make, buildWorkbook, readiness, derive, safe, money };
+    })();
+    // <<< REPORT KIT <<<
+
     function App() {
       const [activeTab, setActiveTab] = useState('vault');
       const [records, setRecords] = useState([]);
@@ -772,6 +1927,9 @@ Rules:
       const [visionModel, setVisionModel] = useState(DEFAULT_VISION_MODEL);
       const [staleDays, setStaleDays] = useState(DEFAULT_STALE_DAYS);
       const [notes, setNotes] = useState('');
+      const [reportsOpen, setReportsOpen] = useState(false);
+      const [reportOwner, setReportOwner] = useState(() => { try { return localStorage.getItem('report_owner_name') || ''; } catch (e) { return ''; } });
+      const [reportCover, setReportCover] = useState(() => { try { return localStorage.getItem('report_cover') !== 'false'; } catch (e) { return true; } });
       const [parsing, setParsing] = useState(false);
       const [parseError, setParseError] = useState('');
 
@@ -1016,7 +2174,7 @@ Rules:
         } catch (err) {
           console.warn('Icon render skipped (lucide error):', err);
         }
-      }, [records, expenses, documents, contacts, activeTab, parsing, pendingParsedData, isSettingsOpen, viewingDocument, expenseCategoryFilter, expenseSearchQuery, strategyReport, strategyLoading, installPromptEvent, isLocked, pinError, pinLockEnabled, showPinSetup, toasts, confirmModal, strategyChatOpen, strategyChatMessages, strategyChatLoading, goals, accountHistory, editingGoalId, helpOpen, helpCardIndex, budgetImportOpen, budgetImportRows, budgetImportLoading, viewingAccount, restorePreview, restoreStep, restoreConflictChoices]);
+      }, [records, expenses, documents, contacts, activeTab, parsing, pendingParsedData, isSettingsOpen, viewingDocument, expenseCategoryFilter, expenseSearchQuery, strategyReport, strategyLoading, installPromptEvent, isLocked, pinError, pinLockEnabled, showPinSetup, toasts, confirmModal, strategyChatOpen, strategyChatMessages, strategyChatLoading, goals, accountHistory, editingGoalId, helpOpen, helpCardIndex, budgetImportOpen, budgetImportRows, budgetImportLoading, viewingAccount, restorePreview, restoreStep, restoreConflictChoices, reportsOpen]);
 
       const loadAllData = async () => {
         try {
@@ -2057,148 +3215,62 @@ Rules:
 
       const getDocumentForAccount = (accountId) => documents.find(d => d.accountId === accountId);
 
+      // Single plain-object view of everything the reports need
+      const reportData = () => ({ owner: reportOwner, monthlyIncome, staleDays, lastBackupAt, notes, records, expenses, documents, contacts, networthHistory, accountHistory, goals, strategyReport });
+
       // Continuity readiness checklist
       const accountsWithDocs = records.filter(r => r.documentId).length;
       const accountsCurrent = records.filter(r => !getStaleness(r.statementDate, staleDays).isStale).length;
       const backupAgeDays = lastBackupAt ? daysBetween(lastBackupAt.slice(0, 10)) : null;
       const isBackupStale = backupAgeDays === null || backupAgeDays > BACKUP_STALE_DAYS;
-      const readinessItems = [
-        { label: 'Executor / handoff notes written', done: notes.trim().length > 0 },
-        { label: 'At least one key contact added', done: contacts.length > 0 },
-        { label: `Accounts with a document on file (${accountsWithDocs}/${records.length || 0})`, done: records.length > 0 && accountsWithDocs === records.length },
-        { label: `Accounts with a current statement (${accountsCurrent}/${records.length || 0})`, done: records.length > 0 && accountsCurrent === records.length },
-        { label: backupAgeDays === null ? 'No backup ever exported' : `Backup exported ${backupAgeDays} day(s) ago`, done: !isBackupStale }
-      ];
+      const readinessItems = ReportKit.readiness(reportData()).items;
 
-      // ---------------- PDF EXPORT ----------------
-      const generateExecutorPDF = () => {
-        const doc = new jsPDF();
-
-        doc.setFontSize(20);
-        doc.text('OFFLINE ESTATE, BUDGET & FINANCIAL SNAPSHOT', 14, 20);
-        doc.setFontSize(10);
-        doc.text(`Generated: ${new Date().toLocaleString()} | Client-Side Vault`, 14, 27);
-        doc.line(14, 30, 196, 30);
-
-        let y = 40;
-        doc.setFontSize(14);
-        doc.text('Executor & Settlement Instructions', 14, y);
-        y += 7;
-        doc.setFontSize(10);
-        const splitNotes = doc.splitTextToSize(notes || 'No specific executor instructions provided.', 180);
-        doc.text(splitNotes, 14, y);
-        y += (splitNotes.length * 5) + 8;
-
-        if (contacts.length > 0) {
-          if (y > 250) { doc.addPage(); y = 20; }
-          doc.setFontSize(14);
-          doc.text('Key Contacts', 14, y);
-          y += 7;
-          doc.setFontSize(9);
-          contacts.forEach(c => {
-            if (y > 275) { doc.addPage(); y = 20; }
-            doc.text(`${c.name}${c.role ? ' (' + c.role + ')' : ''} — ${c.phone || ''} ${c.email || ''}`, 14, y);
-            y += 5;
-          });
-          y += 6;
+      // ---------------- REPORT EXPORT (PDF / print / Excel) ----------------
+      const exportReport = (id, mode = 'download') => {
+        const rep = ReportKit.REPORTS.find(r => r.id === id);
+        if (!rep) return;
+        if (rep.needs === 'strategyReport' && !strategyReport) {
+          showToast('error', 'Generate a Wealth Strategy report first (Strategy tab).');
+          return;
         }
-
-        if (y > 250) { doc.addPage(); y = 20; }
-        doc.setFontSize(14);
-        doc.text('Account Ledger & Strategic Balance', 14, y);
-        y += 8;
-
-        doc.setFontSize(8);
-        doc.text('Institution', 14, y);
-        doc.text('Type', 55, y);
-        doc.text('Acct #', 82, y);
-        doc.text('APR', 108, y);
-        doc.text('Balance', 128, y);
-        doc.text('Stmt Date', 155, y);
-        doc.text('Doc?', 182, y);
-        y += 4;
-        doc.line(14, y, 196, y);
-        y += 6;
-
-        let totalAssetsPdf = 0;
-        let totalLiabilitiesPdf = 0;
-
-        records.forEach((rec) => {
-          if (y > 270) { doc.addPage(); y = 20; }
-          doc.text(String(rec.institution).slice(0, 22), 14, y);
-          doc.text(rec.accountType, 55, y);
-          doc.text(rec.accountNumberMasked || 'N/A', 82, y);
-          doc.text(`${rec.interestRate}%`, 108, y);
-          doc.text(`$${rec.balance.toLocaleString('en-US', { minimumFractionDigits: 2 })}`, 128, y);
-          doc.text(rec.statementDate || 'Unknown', 155, y);
-          doc.text(rec.documentId ? 'Yes' : 'No', 182, y);
-
-          if (rec.category === 'Asset') totalAssetsPdf += rec.balance;
-          else totalLiabilitiesPdf += rec.balance;
-
-          y += 6;
-
-          const linkedVal = parseFloat(rec.linkedAssetValue) || 0;
-          if (linkedVal > 0) {
-            if (y > 270) { doc.addPage(); y = 20; }
-            const equity = linkedVal - rec.balance;
-            doc.setFontSize(7);
-            doc.text(`   ↳ ${rec.linkedAssetLabel || 'Asset Value'}: $${linkedVal.toLocaleString('en-US', { minimumFractionDigits: 2 })}  |  Equity: $${equity.toLocaleString('en-US', { minimumFractionDigits: 2 })}`, 14, y);
-            doc.setFontSize(8);
-            totalAssetsPdf += linkedVal;
-            y += 5;
+        // Open the print tab synchronously inside the click so pop-up blockers allow it.
+        let win = null;
+        if (mode === 'print') { try { win = window.open('', '_blank'); } catch (e) { win = null; } }
+        try {
+          const out = ReportKit.make(id, reportData(), { cover: reportCover });
+          if (mode === 'print') {
+            const url = URL.createObjectURL(out.doc.output('blob'));
+            if (win) {
+              win.location.href = url;
+              showToast('info', 'Opened in a new tab. Use its print button to print.');
+            } else {
+              out.doc.save(out.filename);
+              showToast('info', 'Pop-ups are blocked, so the PDF was downloaded. Open it to print.');
+            }
+          } else {
+            out.doc.save(out.filename);
+            showToast('success', `${rep.title} downloaded.`);
           }
-        });
-
-        const accountsWithNotes = records.filter(r => r.notes && r.notes.trim());
-        if (accountsWithNotes.length > 0) {
-          y += 4;
-          if (y > 260) { doc.addPage(); y = 20; }
-          doc.setFontSize(11);
-          doc.text('Account Notes', 14, y);
-          y += 6;
-          doc.setFontSize(8);
-          accountsWithNotes.forEach(r => {
-            if (y > 275) { doc.addPage(); y = 20; }
-            const lines = doc.splitTextToSize(`${r.institution}: ${r.notes}`, 180);
-            doc.text(lines, 14, y);
-            y += lines.length * 4 + 2;
-          });
+        } catch (err) {
+          if (win) { try { win.close(); } catch (e) {} }
+          console.error('Report failed:', err);
+          showToast('error', 'Could not build the report: ' + err.message);
         }
-
-        y += 4;
-        if (y > 260) { doc.addPage(); y = 20; }
-        doc.line(14, y, 196, y);
-        y += 8;
-
-        const totalFixedExpensesPdf = expenses.reduce((a, b) => a + monthlyEquivalent(b), 0);
-
-        doc.setFontSize(11);
-        doc.text(`Total Liquid & Fixed Assets: $${totalAssetsPdf.toLocaleString('en-US', { minimumFractionDigits: 2 })}`, 14, y);
-        y += 6;
-        doc.text(`Total Debt Liabilities: $${totalLiabilitiesPdf.toLocaleString('en-US', { minimumFractionDigits: 2 })}`, 14, y);
-        y += 6;
-        doc.text(`Net Estate Settlement Value: $${(totalAssetsPdf - totalLiabilitiesPdf).toLocaleString('en-US', { minimumFractionDigits: 2 })}`, 14, y);
-        y += 6;
-        doc.text(`Monthly Recurring Expenses: $${totalFixedExpensesPdf.toLocaleString('en-US', { minimumFractionDigits: 2 })}`, 14, y);
-        y += 10;
-
-        if (upcomingBills.length > 0) {
-          if (y > 250) { doc.addPage(); y = 20; }
-          doc.setFontSize(12);
-          doc.text('Bills Due Within 14 Days', 14, y);
-          y += 6;
-          doc.setFontSize(9);
-          upcomingBills.forEach(b => {
-            if (y > 275) { doc.addPage(); y = 20; }
-            const dueLabel = b.frequency === 'annual' ? `${MONTH_NAMES[(b.dueMonth || 1) - 1]} ${b.dueDay}` : `day ${b.dueDay}`;
-            doc.text(`${b.name} — $${b.amount.toLocaleString('en-US', { minimumFractionDigits: 2 })} — due in ${b.daysUntil} day(s) (${dueLabel})`, 14, y);
-            y += 5;
-          });
-        }
-
-        doc.save('Estate_Financial_Settlement_Snapshot.pdf');
       };
+
+      const exportWorkbook = () => {
+        try {
+          const wb = ReportKit.buildWorkbook(reportData());
+          const n = new Date(); const stamp = n.getFullYear() + '-' + String(n.getMonth() + 1).padStart(2, '0') + '-' + String(n.getDate()).padStart(2, '0');
+          XLSX.writeFile(wb, `Financial_Vault_Data_${stamp}.xlsx`);
+          showToast('success', 'Excel workbook downloaded.');
+        } catch (err) {
+          console.error('Workbook export failed:', err);
+          showToast('error', 'Could not build the workbook: ' + err.message);
+        }
+      };
+
+      const generateExecutorPDF = () => exportReport('settlement');
 
       // ---------------- WEALTH STRATEGY (GROQ GOALS REPORT) ----------------
       const buildFinancialSnapshot = () => ({
@@ -2295,99 +3367,29 @@ Rules:
         }
       };
 
-      const generateStrategyPDF = () => {
-        if (!strategyReport) return;
-        const doc = new jsPDF();
-
-        doc.setFontSize(18);
-        doc.text('Wealth Strategy Report', 14, 20);
-        doc.setFontSize(9);
-        doc.text(`Generated: ${new Date(strategyReport.generatedAt).toLocaleString()}`, 14, 27);
-        doc.line(14, 30, 196, 30);
-
-        let y = 40;
-        doc.setFontSize(12);
-        const headlineLines = doc.splitTextToSize(strategyReport.headline || '', 180);
-        doc.text(headlineLines, 14, y);
-        y += headlineLines.length * 6 + 8;
-
-        if (strategyReport.strengths && strategyReport.strengths.length) {
-          if (y > 250) { doc.addPage(); y = 20; }
-          doc.setFontSize(12);
-          doc.text('Strengths', 14, y);
-          y += 6;
-          doc.setFontSize(9);
-          strategyReport.strengths.forEach(s => {
-            if (y > 270) { doc.addPage(); y = 20; }
-            const lines = doc.splitTextToSize('• ' + s, 180);
-            doc.text(lines, 14, y);
-            y += lines.length * 5 + 2;
-          });
-          y += 4;
-        }
-
-        if (strategyReport.risks && strategyReport.risks.length) {
-          if (y > 250) { doc.addPage(); y = 20; }
-          doc.setFontSize(12);
-          doc.text('Risks', 14, y);
-          y += 6;
-          doc.setFontSize(9);
-          strategyReport.risks.forEach(s => {
-            if (y > 270) { doc.addPage(); y = 20; }
-            const lines = doc.splitTextToSize('• ' + s, 180);
-            doc.text(lines, 14, y);
-            y += lines.length * 5 + 2;
-          });
-          y += 4;
-        }
-
-        if (strategyReport.strategies && strategyReport.strategies.length) {
-          if (y > 240) { doc.addPage(); y = 20; }
-          doc.setFontSize(12);
-          doc.text('Recommended Strategies', 14, y);
-          y += 7;
-          strategyReport.strategies.forEach((s, i) => {
-            if (y > 255) { doc.addPage(); y = 20; }
-            doc.setFontSize(10);
-            doc.text(`${i + 1}. ${s.title || ''} [${(s.priority || 'medium').toUpperCase()}]`, 14, y);
-            y += 5;
-            doc.setFontSize(8);
-            if (s.rationale) {
-              const ratLines = doc.splitTextToSize(`Why: ${s.rationale}`, 178);
-              if (y > 275) { doc.addPage(); y = 20; }
-              doc.text(ratLines, 18, y);
-              y += ratLines.length * 4 + 1;
-            }
-            if (s.action) {
-              const actLines = doc.splitTextToSize(`Action: ${s.action}`, 178);
-              if (y > 275) { doc.addPage(); y = 20; }
-              doc.text(actLines, 18, y);
-              y += actLines.length * 4 + 1;
-            }
-            if (s.estimatedImpact) {
-              const impLines = doc.splitTextToSize(`Estimated impact: ${s.estimatedImpact}`, 178);
-              if (y > 275) { doc.addPage(); y = 20; }
-              doc.text(impLines, 18, y);
-              y += impLines.length * 4 + 1;
-            }
-            y += 3;
-          });
-        }
-
-        if (strategyReport.cashflowNotes) {
-          if (y > 250) { doc.addPage(); y = 20; }
-          doc.setFontSize(12);
-          doc.text('Cashflow Notes', 14, y);
-          y += 6;
-          doc.setFontSize(8);
-          const lines = doc.splitTextToSize(strategyReport.cashflowNotes, 180);
-          doc.text(lines, 14, y);
-        }
-
-        doc.save('Wealth_Strategy_Report.pdf');
-      };
+      const generateStrategyPDF = () => exportReport('strategy');
 
       // ---------------- SMALL COMPONENTS ----------------
+      const ReportBar = ({ ids }) => (
+        <div className="no-print flex flex-wrap items-center justify-end gap-2 -mb-2">
+          <span className="text-[10px] uppercase tracking-wider text-slate-500 mr-1">Report</span>
+          {ids.map(id => {
+            const rep = ReportKit.REPORTS.find(r => r.id === id);
+            return (
+              <div key={id} className="flex items-center rounded-lg overflow-hidden border border-slate-700 text-xs">
+                <button onClick={() => exportReport(id)} className="flex items-center gap-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 px-3 py-1.5 transition" title={`Download ${rep.title} as PDF`}>
+                  <i data-lucide="download" className="w-3.5 h-3.5"></i> {rep.title}
+                </button>
+                <button onClick={() => exportReport(id, 'print')} className="bg-slate-800 hover:bg-slate-700 text-slate-300 px-2.5 py-1.5 border-l border-slate-700 transition" title="Print">
+                  <i data-lucide="printer" className="w-3.5 h-3.5"></i>
+                </button>
+              </div>
+            );
+          })}
+          <button onClick={() => setReportsOpen(true)} className="text-xs text-emerald-400 hover:text-emerald-300 px-2 py-1.5">All reports</button>
+        </div>
+      );
+
       const StaleBadge = ({ statementDate }) => {
         const s = getStaleness(statementDate, staleDays);
         if (!s.known) {
@@ -3090,6 +4092,13 @@ Rules:
                   <i data-lucide="settings" className="w-5 h-5"></i>
                 </button>
                 <button
+                  onClick={() => setReportsOpen(true)}
+                  className="flex items-center justify-center gap-2 p-2.5 sm:px-4 bg-slate-700 hover:bg-slate-600 text-slate-200 rounded-lg transition text-sm font-medium"
+                  title="Reports & exports"
+                >
+                  <i data-lucide="printer" className="w-5 h-5"></i><span className="hidden sm:inline">Reports</span>
+                </button>
+                <button
                   onClick={generateExecutorPDF}
                   className="flex items-center gap-2 bg-emerald-600 hover:bg-emerald-500 text-white px-3.5 sm:px-5 py-2.5 rounded-lg font-medium transition shadow-md text-sm whitespace-nowrap"
                 >
@@ -3213,6 +4222,7 @@ Rules:
             )}
 
             {/* TAB 1: ASSET & LIABILITY VAULT */}
+            {activeTab === 'vault' && <ReportBar ids={["networth", "settlement"]} />}
             {activeTab === 'vault' && (
               <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
                 <div className="space-y-6">
@@ -3321,6 +4331,7 @@ Rules:
             )}
 
             {/* TAB 2: BUDGET & EXPENSES */}
+            {activeTab === 'budget' && <ReportBar ids={["budget"]} />}
             {activeTab === 'budget' && (
               <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
                 <div className="space-y-6">
@@ -3569,6 +4580,7 @@ Rules:
               </div>
             )}
 
+            {activeTab === 'goals' && <ReportBar ids={["goals"]} />}
             {/* TAB: GOALS */}
             {activeTab === 'goals' && (
               <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
@@ -3736,6 +4748,7 @@ Rules:
               </div>
             )}
 
+            {activeTab === 'continuity' && <ReportBar ids={["continuity"]} />}
             {/* TAB 4: CONTINUITY PLAN */}
             {activeTab === 'continuity' && (
               <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
@@ -3853,7 +4866,7 @@ Rules:
                         <button onClick={generateStrategyPDF} className="flex items-center gap-2 bg-slate-700 hover:bg-slate-600 text-slate-100 px-4 py-2 rounded-lg text-xs font-medium transition">
                           <i data-lucide="download" className="w-4 h-4"></i> Export PDF
                         </button>
-                        <button onClick={() => window.print()} className="flex items-center gap-2 bg-slate-700 hover:bg-slate-600 text-slate-100 px-4 py-2 rounded-lg text-xs font-medium transition">
+                        <button onClick={() => exportReport('strategy', 'print')} className="flex items-center gap-2 bg-slate-700 hover:bg-slate-600 text-slate-100 px-4 py-2 rounded-lg text-xs font-medium transition">
                           <i data-lucide="printer" className="w-4 h-4"></i> Print
                         </button>
                       </React.Fragment>
@@ -3939,6 +4952,75 @@ Rules:
             )}
 
             <p className="no-print text-center text-[10px] text-slate-700 font-mono pt-2">Financial Vault · Build {APP_VERSION}</p>
+
+            {/* REPORTS & EXPORTS */}
+            {reportsOpen && (
+              <div className="no-print fixed inset-0 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4 z-50" onClick={() => setReportsOpen(false)}>
+                <div className="bg-slate-800 border border-slate-700 rounded-xl max-w-2xl w-full max-h-[90vh] overflow-y-auto shadow-2xl" onClick={(e) => e.stopPropagation()}>
+                  <div className="flex justify-between items-center border-b border-slate-700 px-6 py-4 sticky top-0 bg-slate-800">
+                    <h3 className="text-base font-bold text-slate-100 flex items-center gap-2">
+                      <i data-lucide="printer" className="w-5 h-5 text-emerald-400"></i> Reports & Exports
+                    </h3>
+                    <button onClick={() => setReportsOpen(false)} className="text-slate-400 hover:text-slate-200 text-xs">✕ Close</button>
+                  </div>
+                  <div className="p-6 space-y-5">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 items-end">
+                      <div>
+                        <label className="text-[11px] text-slate-400 block mb-1">Prepared for (shown on the cover and footer)</label>
+                        <input
+                          type="text" value={reportOwner} placeholder="Your name"
+                          onChange={(e) => { setReportOwner(e.target.value); try { localStorage.setItem('report_owner_name', e.target.value); } catch (err) {} }}
+                          className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-100 focus:outline-none focus:border-emerald-500"
+                        />
+                      </div>
+                      <label className="flex items-center gap-2 text-xs text-slate-300 pb-2 cursor-pointer">
+                        <input type="checkbox" checked={reportCover} onChange={(e) => { setReportCover(e.target.checked); try { localStorage.setItem('report_cover', String(e.target.checked)); } catch (err) {} }} />
+                        Include a cover page
+                      </label>
+                    </div>
+
+                    <div className="space-y-2">
+                      {ReportKit.REPORTS.map(rep => {
+                        const unavailable = rep.needs === 'strategyReport' && !strategyReport;
+                        return (
+                          <div key={rep.id} className="flex flex-col sm:flex-row sm:items-center gap-3 bg-slate-900/60 border border-slate-700 rounded-lg p-3.5">
+                            <div className="flex items-start gap-3 flex-1 min-w-0">
+                              <i data-lucide={rep.icon} className="w-5 h-5 text-emerald-400 shrink-0 mt-0.5"></i>
+                              <div>
+                                <div className="text-sm font-semibold text-slate-100">{rep.title}</div>
+                                <div className="text-[11px] text-slate-400 mt-0.5">{unavailable ? 'Generate a report in the Strategy tab first.' : rep.desc}</div>
+                              </div>
+                            </div>
+                            <div className="flex gap-2 shrink-0">
+                              <button disabled={unavailable} onClick={() => exportReport(rep.id)} className="flex items-center gap-1.5 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 disabled:cursor-not-allowed text-white px-3 py-1.5 rounded-lg text-xs font-medium transition">
+                                <i data-lucide="download" className="w-3.5 h-3.5"></i> PDF
+                              </button>
+                              <button disabled={unavailable} onClick={() => exportReport(rep.id, 'print')} className="flex items-center gap-1.5 bg-slate-700 hover:bg-slate-600 disabled:opacity-40 disabled:cursor-not-allowed text-slate-100 px-3 py-1.5 rounded-lg text-xs font-medium transition">
+                                <i data-lucide="printer" className="w-3.5 h-3.5"></i> Print
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      })}
+
+                      <div className="flex flex-col sm:flex-row sm:items-center gap-3 bg-slate-900/60 border border-slate-700 rounded-lg p-3.5">
+                        <div className="flex items-start gap-3 flex-1 min-w-0">
+                          <i data-lucide="table" className="w-5 h-5 text-blue-400 shrink-0 mt-0.5"></i>
+                          <div>
+                            <div className="text-sm font-semibold text-slate-100">Excel Workbook</div>
+                            <div className="text-[11px] text-slate-400 mt-0.5">Accounts, budget, goals, contacts and net worth history as editable spreadsheet tabs.</div>
+                          </div>
+                        </div>
+                        <button onClick={exportWorkbook} className="flex items-center gap-1.5 bg-slate-700 hover:bg-slate-600 text-slate-100 px-3 py-1.5 rounded-lg text-xs font-medium transition shrink-0">
+                          <i data-lucide="download" className="w-3.5 h-3.5"></i> .xlsx
+                        </button>
+                      </div>
+                    </div>
+                    <p className="text-[10px] text-slate-500">Reports are built on this device from your vault data. Nothing is uploaded. They contain personal financial information, so store and share them carefully.</p>
+                  </div>
+                </div>
+              </div>
+            )}
 
             {/* PARSED / EDIT ACCOUNT MODAL */}
             {pendingParsedData && (
